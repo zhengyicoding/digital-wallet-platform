@@ -4,6 +4,25 @@ server:
 spring:
   application:
     name: notification-service
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: notification-service
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+    listener:
+      ack-mode: record
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      properties:
+        "[enable.idempotence]": true
+        "[max.block.ms]": 3000
+        "[delivery.timeout.ms]": 10000
+        "[request.timeout.ms]": 3000
   datasource:
     url: ${NOTIFICATION_DB_URL:jdbc:postgresql://localhost:5432/notification_db}
     username: ${NOTIFICATION_DB_USER:notification_user}
@@ -31,6 +50,10 @@ management:
 
 springdoc:
   swagger-ui:
-    path: /docs/notifications
+    path: /docs/notifications/ui
   api-docs:
     path: /docs/notifications/v3/api-docs
+
+notification:
+  issuer: ${JWT_ISSUER:digital-wallet-auth}
+  jwks-uri: ${JWKS_URI:http://localhost:8081/.well-known/jwks.json}

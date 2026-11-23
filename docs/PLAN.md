@@ -50,7 +50,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 - [x] **M6 outbox + Kafka**: outbox rows written in business transactions (EVT-1), relay with per-aggregate ordering
   (EVT-2), topic `wallet.events` with 3+ partitions, JSON envelope per Section 7. API keeps working while Kafka is
   down (EVT-3). Test: ACC-2 #15.
-- [ ] **M7 notification-service**: consumer for `wallet.events`, dedupe by `eventId` (NTF-2/EVT-4), notification texts
+- [x] **M7 notification-service**: consumer for `wallet.events`, dedupe by `eventId` (NTF-2/EVT-4), notification texts
   with money formatting `$1,250.00` (Section 5.8), list/unread-count/read/read-all APIs, resource-server security,
   DLT `wallet.events.dlt` for unparseable messages (NTF-4), admin stats counters (NTF-5), Flyway, springdoc at
   `/docs/notifications/`. Tests: ACC-2 #16, #17.
@@ -135,3 +135,19 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   Kafka 3.8 tests verified automatic delivery of all eight transfers committed during a broker outage, settlement
   rollback, and ordered redelivery with overlapping relays. Wallet-core tests also checked Section 7 payloads,
   transfer rollback, idempotent API replay, and duplicate webhooks.
+
+- 2026-11-23 — M7 complete (NTF-1 through NTF-5, EVT-4/5, ACC-2 #16/#17 and notification access in #7).
+  Consumes all six M6 event envelopes and formats integer cents using the exact Section 5.8 texts. A PostgreSQL
+  event-ID primary key and all recipient notifications commit in one transaction before the RECORD-mode Kafka
+  offset commit. Unknown fields/types/versions are ignored. Unparseable records retain their original key/value
+  bytes in `wallet.events.dlt`; the source offset advances only after Kafka confirms the DLT send. Database and
+  Kafka failures retry without exhausted recovery. Added JWT-scoped cursor APIs, read operations, admin-only
+  startup counters, Prometheus counters, Flyway V2, and public notification OpenAPI/Swagger UI.
+  Final root `./mvnw -q verify` passed 47 tests with zero failures, errors, or skips; Surefire confirms seven
+  PostgreSQL 16/Kafka 3.8 notification tests ran. Coverage includes duplicate transfers, offset rewind and replay
+  after consumer restart/rejoin, all texts, unsupported events, original DLT bytes and same-partition continuation,
+  a failed DLT send, a rolled-back second-recipient insert and retry, pagination, admin counters, and cross-user 404.
+  Compose rebuilt successfully with every container healthy. After reloading nginx to resolve recreated services,
+  a 10,000-cent deposit funded a 1,250-cent transfer through the M6 outbox/Kafka pipeline: both users' notification
+  APIs returned exactly one transfer notification with the required text. OpenAPI and Swagger UI passed through
+  `/docs/notifications/`. M8 frontend and M10 reconciliation remain scheduled as before.
