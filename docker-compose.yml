@@ -174,6 +174,11 @@ services:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
       - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   grafana:
     image: grafana/grafana:11.2.0
@@ -185,7 +190,13 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   tempo:
     image: grafana/tempo:2.5.0
@@ -195,6 +206,12 @@ services:
     ports:
       - "4318:4318"
       - "3200:3200"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3200/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
 
 volumes:
   pgdata:

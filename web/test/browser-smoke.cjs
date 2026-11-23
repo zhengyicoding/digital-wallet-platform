@@ -1,4 +1,4 @@
-// UI-1/2/4..7, SEC-8; ACC-1 B2..B6 smoke evidence, not the M9 baseline gate.
+// UI-1/2/4..7, SEC-8; ACC-1 B2–B7 through the Compose edge.
 // Requires an installed playwright-core and Chrome; see web/README.md.
 const { chromium } = require(process.env.PLAYWRIGHT_CORE_PATH || 'playwright-core');
 const assert = require('node:assert/strict');
@@ -48,6 +48,16 @@ async function recipient(page, username) {
 async function notificationCount(page, count) {
   await page.waitForFunction(count => document.querySelector('nav .badge')?.textContent === String(count), count, { timeout: 5000 });
 }
+async function walletToken(page) {
+  const token = await page.evaluate(() => sessionStorage.getItem('wallet.accessToken'));
+  assert.ok(token, 'Expected a token from the browser login');
+  return { Authorization: `Bearer ${token}` };
+}
+async function assertProblem(response, status, code) {
+  assert.equal(response.status(), status);
+  assert.match(response.headers()['content-type'], /^application\/problem\+json\b/);
+  assert.equal((await response.json()).code, code);
+}
 async function run() {
   browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
   const aliceContext = await browser.newContext();
@@ -62,25 +72,37 @@ async function run() {
   let originalConfig;
   try {
     const configResponse = await aliceContext.request.get(`${base}/bank/admin/config`);
+    assert.ok(configResponse.ok());
     originalConfig = await configResponse.json();
     // A two-second settlement makes pending and reserve observable without changing customer APIs.
-    await aliceContext.request.put(`${base}/bank/admin/config`, { data: { settleDelayMs: 2000 } });
+    assert.ok((await aliceContext.request.put(`${base}/bank/admin/config`, { data: { settleDelayMs: 2000 } })).ok());
     await signup(alice, users.alice, 'Alice Chen');
     await signup(bob, users.bob, 'Bob Lee');
+    const aliceWallet = await alice.locator('.identity span').last().textContent();
+    assert.notEqual(await bob.locator('.identity span').last().textContent(), aliceWallet);
     record('ACC-1 B2: Alice and Bob sign up, log in and open distinct zero-balance wallets');
-    const aliceWallet = await alice.locator('.identity').textContent();
-    assert.notEqual(await bob.locator('.identity').textContent(), aliceWallet);
 
     await nav(alice, 'Add money');
+    const depositResponse = alice.waitForResponse(response =>
+      new URL(response.url()).pathname === '/api/v1/deposits' && response.request().method() === 'POST');
     await review(alice, '100.00');
+    const acceptedDeposit = await depositResponse;
+    assert.equal(acceptedDeposit.status(), 202);
+    const deposit = await acceptedDeposit.json();
+    assert.equal(deposit.status, 'PENDING');
+    assert.equal(deposit.amount, 10000);
+    assert.ok(deposit.id);
     await text(alice, '#payment-status', 'PENDING');
     const depositPendingAt = Date.now();
     await text(alice, '#payment-status', 'SUCCEEDED');
     assert.ok(Date.now() - depositPendingAt < 7000, 'Deposit refresh exceeded 2s settlement + 5s UI allowance');
     await notificationCount(alice, 1);
     await nav(alice, 'Home'); await text(alice, '#balance', '$100.00');
-    await nav(alice, 'Activity'); await text(alice, '#entries-rows', 'DEPOSIT');
-    await text(alice, '#entries-rows', 'Balance after: $100.00');
+    await nav(alice, 'Activity'); await text(alice, '#entries-rows .row', 'DEPOSIT');
+    await text(alice, '#entries-rows .row', 'Balance after: $100.00');
+    await text(alice, '#entries-rows .row', `Reference: ${deposit.id}`);
+    await nav(alice, 'Notifications');
+    await text(alice, '#notifications-rows', 'Your deposit of $100.00 is complete');
     record('ACC-1 B3 / UI-5: $100 deposit PENDING → SUCCEEDED, $100 balance, DEPOSIT statement and one notification');
 
     await nav(alice, 'Send');
@@ -94,10 +116,18 @@ async function run() {
     await nav(alice, 'Home'); await text(alice, '#balance', '$87.50');
     await text(bob, '#balance', '$12.50');
     await notificationCount(alice, 2); await notificationCount(bob, 1);
-    for (const [page, balance] of [[alice, '$87.50'], [bob, '$12.50']]) {
-      await nav(page, 'Activity'); await text(page, '#entries-rows', note);
-      await text(page, '#entries-rows', `Balance after: ${balance}`);
-      assert.equal(await page.locator('#entries-rows b').count(), 0);
+    for (const [page, type, amount, balance, notification] of [
+      [alice, 'TRANSFER_OUT', '-$12.50', '$87.50', 'You sent $12.50 to Bob Lee'],
+      [bob, 'TRANSFER_IN', '+$12.50', '$12.50', 'You received $12.50 from Alice Chen']
+    ]) {
+      await nav(page, 'Activity');
+      const row = page.locator('#entries-rows .row').filter({ hasText: type });
+      await row.getByText(note, { exact: true }).waitFor();
+      await row.getByText(amount, { exact: true }).waitFor();
+      await row.getByText(`Balance after: ${balance}`, { exact: true }).waitFor();
+      assert.equal(await row.locator('b').count(), 0);
+      await nav(page, 'Notifications');
+      await text(page, '#notifications-rows', notification);
     }
     record('ACC-1 B4 / SEC-8: recipient display name, $12.50 transfer, both running balances, literal markup note and both notifications');
 
@@ -113,21 +143,46 @@ async function run() {
     assert.ok(Date.now() - withdrawalPendingAt < 7000, 'Withdrawal refresh exceeded 2s settlement + 5s UI allowance');
     await nav(alice, 'Home'); await text(alice, '#reserved', '$0.00');
     await notificationCount(alice, 4);
-    await nav(alice, 'Activity'); await text(alice, '#entries-rows', 'WITHDRAWAL');
-    await text(alice, '#entries-rows', 'Balance after: $67.50');
+    await nav(alice, 'Activity');
+    const withdrawalEntry = alice.locator('#entries-rows .row').filter({ hasText: 'WITHDRAWAL' });
+    await withdrawalEntry.getByText('-$20.00', { exact: true }).waitFor();
+    await withdrawalEntry.getByText('Balance after: $67.50', { exact: true }).waitFor();
     await text(alice, '#withdrawals-rows', 'SUCCEEDED');
+    await nav(alice, 'Notifications');
+    await text(alice, '#notifications-rows', 'Your withdrawal of $20.00 is in progress');
+    await text(alice, '#notifications-rows', 'Your withdrawal of $20.00 is complete');
     record('ACC-1 B5 / UI-5: $20 withdrawal reserve observed, PENDING → SUCCEEDED, $67.50 available, $0 reserved, daily spend $32.50 and two new notifications');
 
-    for (const [username, amount, code] of [[users.bob, '100', 'INSUFFICIENT_FUNDS'], [users.alice, '1', 'SAME_WALLET']]) {
+    for (const [username, amount, message] of [
+      [users.bob, '100', 'Your wallet has insufficient funds for this payment. (INSUFFICIENT_FUNDS)'],
+      [users.alice, '1', 'You cannot send money to your own wallet. Choose another recipient. (SAME_WALLET)']
+    ]) {
       await nav(alice, 'Send');
       await alice.getByRole('button', { name: 'New payment', exact: true }).click();
       await recipient(alice, username); await alice.locator('#recipient-name').waitFor({ state: 'visible' });
-      await review(alice, amount); await text(alice, '#money-card', code);
+      await review(alice, amount); await text(alice, '#money-card', message);
     }
     await alice.getByRole('button', { name: 'New payment', exact: true }).click();
-    await recipient(alice, `none_${suffix}`); await text(alice, '#money-error', 'WALLET_NOT_FOUND');
-    await nav(alice, 'Home'); await text(alice, '#balance', '$67.50');
-    record('ACC-1 B6 / UI-6: INSUFFICIENT_FUNDS, SAME_WALLET and WALLET_NOT_FOUND shown; balance unchanged');
+    await recipient(alice, `none_${suffix}`);
+    await text(alice, '#money-error', 'No wallet was found for this username. The user may need to open a wallet. (WALLET_NOT_FOUND)');
+    for (const [page, balance] of [[alice, '$67.50'], [bob, '$12.50']]) {
+      await page.reload();
+      await page.locator('#balance').getByText(balance, { exact: true }).waitFor();
+    }
+    record('ACC-1 B6 / UI-6: INSUFFICIENT_FUNDS, SAME_WALLET and WALLET_NOT_FOUND shown; both balances unchanged');
+
+    const walletUrl = `${base}/api/v1/wallets/me`;
+    await assertProblem(await bobContext.request.get(walletUrl), 401, 'UNAUTHENTICATED');
+    const bobHeaders = await walletToken(bob);
+    const ownWallet = await bobContext.request.get(walletUrl, { headers: bobHeaders });
+    assert.equal(ownWallet.status(), 200);
+    assert.equal((await ownWallet.json()).username, users.bob);
+    const depositUrl = `${base}/api/v1/deposits/${deposit.id}`;
+    const ownerDeposit = await aliceContext.request.get(depositUrl, { headers: await walletToken(alice) });
+    assert.equal(ownerDeposit.status(), 200);
+    assert.equal((await ownerDeposit.json()).status, 'SUCCEEDED');
+    await assertProblem(await bobContext.request.get(depositUrl, { headers: bobHeaders }), 404, 'NOT_FOUND');
+    record(`ACC-1 B7 / API-4: missing token returns 401 UNAUTHENTICATED; Bob receives 404 NOT_FOUND for Alice's B3 deposit ${deposit.id}`);
 
     await nav(alice, 'Notifications');
     await text(alice, '#notifications-rows', 'Your withdrawal of $20.00 is complete');

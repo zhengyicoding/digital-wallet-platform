@@ -57,7 +57,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 - [x] **M8 web**: SPA (customer pages UI-2, polling for pending status and notifications every 5s UI-5, error-code
   messages UI-6, fresh idempotency key per action / same key on retry UI-4, token in sessionStorage UI-7), nginx
   routing per Section 6.1 proxy table.
-- [ ] **M9 Baseline gate**: run ACC-1 B1..B7 end to end via `docker compose up --build`; fix gaps.
+- [x] **M9 Baseline gate**: run ACC-1 B1..B7 end to end via `docker compose up --build`; fix gaps.
   **Baseline complete.**
 - [ ] **M10 Resilience**: reconciliation job (30s/10s defaults, RES-7) + admin trigger (ADM-4), re-submission for
   unknown references, restart recovery (RES-8). Admin endpoints: integrity with snapshot isolation (ADM-1),
@@ -181,3 +181,29 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   the original bank configuration after temporarily using a two-second settlement delay. Reusable commands and
   fixture boundaries are documented in `web/README.md`; browser script is `web/test/browser-smoke.cjs`.
   M9 remains unchecked for the formal baseline sign-off; the administration console remains scheduled for M13.
+
+- 2026-11-23 — M9 baseline sign-off complete (OPS-1, ACC-1 B1–B7).
+  `./mvnw -q verify` passed 47 tests and `npm --prefix web test` passed 7 tests, with zero failures or skips.
+  Chrome passed all 15 checks in the expanded M8 script, including the six scenarios B2–B7.
+  The first Compose run exposed missing health checks for Prometheus, Grafana and Tempo. Added HTTP readiness
+  probes for all three and made Grafana wait for Prometheus health. Extended the M8 browser script with
+  real B7 requests and stronger statement, notification and error assertions. Reran B1–B7 on a second fresh
+  Compose project using a copy of `.env.example`, a new database volume and a temporary override for host
+  port bindings to preserve the existing local stack. The bank used a two-second settlement delay during
+  browser verification so Chrome could observe the pending states.
+  - **B1 passed.** All ten containers reported healthy after `docker compose up --build --wait`, without a
+    restart or nginx reload.
+  - **B2 passed.** Alice and Bob registered, logged in and opened distinct wallets at $0.00 in independent
+    Chrome sessions through nginx.
+  - **B3 passed.** Alice's $100.00 deposit went from PENDING to SUCCEEDED. Her balance reached $100.00,
+    her statement showed the DEPOSIT and its running balance, and she received one deposit notification.
+  - **B4 passed.** Alice found Bob by username and sent $12.50 with a note. Both statements showed the note
+    and respective running balances of $87.50 and $12.50. Each received a transfer notification.
+  - **B5 passed.** Alice's $20.00 withdrawal showed PENDING with $20.00 reserved, then SUCCEEDED with $0.00
+    reserved and $67.50 available. Her statement showed the $20.00 debit and $67.50 running balance, and she
+    received the in-progress and completion notifications.
+  - **B6 passed.** The SPA showed the expected INSUFFICIENT_FUNDS, SAME_WALLET and WALLET_NOT_FOUND messages.
+    Alice and Bob reloaded and saw unchanged balances of $67.50 and $12.50.
+  - **B7 passed.** Through nginx, unauthenticated GET `/api/v1/wallets/me` returned 401 UNAUTHENTICATED.
+    Bob's token returned 200 for his own wallet and 404 NOT_FOUND for Alice's B3 deposit
+    `01a20ad4-9754-78ce-9938-4a01e81d1c10`, which Alice could still read with status SUCCEEDED.

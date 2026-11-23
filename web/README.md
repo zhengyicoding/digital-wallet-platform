@@ -39,8 +39,11 @@ It temporarily sets the bank settlement delay to two seconds to observe PENDING 
 funds, then restores the original configuration in `finally`. It never resets bank transactions.
 Run it against a development stack with no concurrent bank configuration changes.
 
-ACC-1 B2–B6 use real services through the customer UI. Additional checks cover cursor pagination,
+ACC-1 B2–B6 use real services through the customer UI. B7 sends real requests through nginx,
+checking unauthenticated wallet access and Bob's access to the deposit Alice created in B3.
+For B1, start a fresh Compose project using `.env.example` and verify that all ten containers
+report healthy before running the browser script. Additional checks cover cursor pagination,
 notification actions, exact cents, lost-response and REQUEST_IN_PROGRESS retries, fresh keys,
 reload persistence, mobile layout, OpenAPI routes, failed login and logout. Two controlled
 browser response fixtures cover a markup display name and an authenticated 401; they are reported
-separately from real backend behavior. Formal baseline sign-off remains M9.
+separately from real backend behavior.
