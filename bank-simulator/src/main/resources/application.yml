@@ -18,6 +18,13 @@ management:
 
 springdoc:
   swagger-ui:
-    path: /docs/bank
+    path: /docs/bank/ui
   api-docs:
     path: /docs/bank/v3/api-docs
+
+bank:
+  api-key: ${BANK_API_KEY}
+  webhook-secret: ${BANK_WEBHOOK_SECRET}
+  webhook-url: ${BANK_WEBHOOK_URL}
+
+spring.jackson.deserialization.accept-float-as-int: false

@@ -37,7 +37,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 - [x] **M3 idempotency**: table + unique constraint, same-transaction write (IDM-4), replay header
   `Idempotent-Replayed: true` (IDM-2), 422 IDEMPOTENCY_KEY_REUSED (IDM-5), 409 REQUEST_IN_PROGRESS with
   `Retry-After: 1` (IDM-6). Tests: ACC-2 #3, #4, #5.
-- [ ] **M4 bank-simulator**: BNK-1..6. In-memory transaction store, POST/GET `/bank/v1/transactions`, X-Api-Key auth
+- [x] **M4 bank-simulator**: BNK-1..6. In-memory transaction store, POST/GET `/bank/v1/transactions`, X-Api-Key auth
   (BNK-5), idempotency by reference (BNK-2), settlement after `settleDelayMs`, signed webhook delivery with
   `webhookCopies` (50–200 ms spacing), admin config/transactions/reset endpoints, runtime failure injection (BNK-6).
   Springdoc at `/docs/bank/`. Standalone — no wallet-service dependency.
@@ -107,3 +107,12 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   response after settlement. Root `./mvnw -q verify` passed all 25 tests with zero skips, including six new
   PostgreSQL tests for ACC-2 #3–5, key validation and scoping, and reuse after rejection or commit failure.
   All nine M2 integration tests passed, including opposing transfers and fresh-transaction retries (CON-3).
+
+- 2026-11-23 — M4 complete. Implemented the standalone in-memory bank transaction API, atomic reference replay,
+  asynchronous settlement, runtime failure controls and reset invalidation (BNK-1 through BNK-6). Webhooks sign
+  the exact transmitted bytes using HMAC-SHA256, use configured copy counts with 50–200 ms spacing, and never
+  retry failed deliveries (SEC-4). Root `./mvnw -q verify` passed 32 tests with zero failures or skips, including
+  eight bank tests using a standalone stub webhook receiver, concurrent replay and a full 30-second hang.
+  Compose startup passed; the rebuilt simulator was healthy, a smoke charge settled successfully, and nginx
+  served `/docs/bank/` and the bank OpenAPI schema successfully. Existing internal `/bank/v1/**` routing remains
+  unchanged. Wallet bank integration, webhook receiving, deposits and withdrawals remain in M5.
