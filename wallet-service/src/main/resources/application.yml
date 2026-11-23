@@ -4,6 +4,11 @@ server:
 spring:
   application:
     name: wallet-service
+  jackson:
+    mapper:
+      allow-coercion-of-scalars: false
+    deserialization:
+      accept-float-as-int: false
   datasource:
     url: ${WALLET_DB_URL:jdbc:postgresql://localhost:5432/wallet_db}
     username: ${WALLET_DB_USER:wallet_user}
@@ -31,6 +36,13 @@ management:
 
 springdoc:
   swagger-ui:
-    path: /docs/wallet
+    path: /docs/wallet/ui
   api-docs:
     path: /docs/wallet/v3/api-docs
+
+wallet:
+  issuer: ${JWT_ISSUER:digital-wallet-auth}
+  jwks-uri: ${JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+  min-amount: ${WALLET_MIN_AMOUNT:1}
+  max-amount: ${WALLET_MAX_AMOUNT:200000}
+  daily-limit: ${WALLET_DAILY_LIMIT:500000}

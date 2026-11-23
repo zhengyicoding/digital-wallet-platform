@@ -29,7 +29,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   Dockerfiles (OPS-9); CI running `verify`.
 - [x] **M1 auth-service**: AUTH-1..6, RS256 JWT with `iss=digital-wallet-auth`, JWKS, `roles` as JSON array claim,
   admin bootstrap from env, `/me`, Flyway, springdoc at `/docs/auth/`.
-- [ ] **M2 wallet core**: migrations (wallets, accounts, ledger_entries, postings, system accounts EXTERNAL_BANK and
+- [x] **M2 wallet core**: migrations (wallets, accounts, ledger_entries, postings, system accounts EXTERNAL_BANK and
   PAYOUT_HOLD), wallet open/me/lookup/entries, transfers with deterministic row-lock ordering by wallet ID, deadlock
   retry (3+), daily limit, cursor pagination `(createdAt, id)`, resource-server security (validate JWT signature, exp,
   iss), springdoc at `/docs/wallet/`. Testcontainers concurrency tests (ACC-2 #1, #2, #6, #8) and authorization
@@ -94,3 +94,10 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   RS256 login and JWKS, authenticated `/me`, and OpenAPI and Swagger UI (AUTH-1..6, API-3/6/8/9, SEC-1/2/5/6/7,
   OPS-2). Root `./mvnw -q verify` passed all 10 tests, including 7 auth-service tests against PostgreSQL 16.
   Login rate limiting (SEC-9) remains scheduled for M11.
+- 2026-11-23 — M2 complete. Added the PostgreSQL wallet ledger and system accounts, wallet and statement APIs,
+  transfers with ordered wallet locks and fresh-transaction retries, M1 JWKS validation, and wallet OpenAPI docs
+  (LED-1..5, WAL-1..5, TRF-1..5, MNY-1..4, CON-1..4, API-3..9, SEC-1/2/5). Root `./mvnw -q verify`
+  passed all 19 tests with zero skips. Nine new PostgreSQL 16 integration tests cover ACC-2 #1, #2, #6, the
+  transfer portion of #7, and #8, including INV-1..6 assertions. Transfers validate the idempotency header.
+  M3 adds key storage and replay. M5 supplies pending reservations and withdrawal contributions to the UTC daily
+  total. Tests use balanced funding fixtures until deposits land. M6 adds the transactional outbox.
