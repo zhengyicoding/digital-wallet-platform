@@ -124,4 +124,5 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   Five new PostgreSQL tests cover ACC-2 #9/#10, withdrawal settlement and reversal, original-response replay,
   timeout/503 retries with funds held, and transfers racing withdrawals for funds and daily allowance.
   Compose settled a 10,000-cent deposit and 2,000-cent withdrawal and replayed both original responses.
+  The first Compose smoke-test attempt returned 502. Reloading nginx restored routing, and the deposit and withdrawal checks passed on retry. The cause of the 502 is still unverified.
   M6 adds the outbox and Kafka publication. M10 adds reconciliation and restart recovery for pending operations.
