@@ -47,7 +47,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   post ledger entries, set final status, all in one transaction (RES-6). Webhook endpoint POST
   `/internal/webhooks/bank` with HMAC-SHA256 + timestamp validation (RES-9, SEC-4). Async submission after 202
   response (RES-1). Tests: ACC-2 #9 (triple webhook), #10 (bad signature).
-- [ ] **M6 outbox + Kafka**: outbox rows written in business transactions (EVT-1), relay with per-aggregate ordering
+- [x] **M6 outbox + Kafka**: outbox rows written in business transactions (EVT-1), relay with per-aggregate ordering
   (EVT-2), topic `wallet.events` with 3+ partitions, JSON envelope per Section 7. API keeps working while Kafka is
   down (EVT-3). Test: ACC-2 #15.
 - [ ] **M7 notification-service**: consumer for `wallet.events`, dedupe by `eventId` (NTF-2/EVT-4), notification texts
@@ -126,3 +126,12 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   Compose settled a 10,000-cent deposit and 2,000-cent withdrawal and replayed both original responses.
   The first Compose smoke-test attempt returned 502. Reloading nginx restored routing, and the deposit and withdrawal checks passed on retry. The cause of the 502 is still unverified.
   M6 adds the outbox and Kafka publication. M10 adds reconciliation and restart recovery for pending operations.
+
+- 2026-11-23 — M6 complete (EVT-1 through EVT-3, ACC-2 #15). All six event types in Section 7 commit with their
+  business changes. The relay sends the stored envelope to `wallet.events`, keyed by aggregate ID, on a topic with
+  at least three partitions. Each worker locks the earliest unsent row for an aggregate and waits for Kafka's
+  acknowledgement before marking it sent. A failed mark leaves the same event ID ready for retry.
+  Root `./mvnw -q verify` passed all 40 tests with zero failures, errors, or skips. Three new PostgreSQL 16 and
+  Kafka 3.8 tests verified automatic delivery of all eight transfers committed during a broker outage, settlement
+  rollback, and ordered redelivery with overlapping relays. Wallet-core tests also checked Section 7 payloads,
+  transfer rollback, idempotent API replay, and duplicate webhooks.

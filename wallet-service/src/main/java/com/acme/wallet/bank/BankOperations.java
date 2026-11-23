@@ -13,6 +13,7 @@ import com.acme.wallet.api.WalletProblems.Kind;
 import com.acme.wallet.idempotency.Idempotency;
 import com.acme.wallet.ledger.Statements.Cursor;
 import com.acme.wallet.ledger.Wallets;
+import com.acme.wallet.outbox.Outbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
@@ -44,12 +45,21 @@ public class BankOperations {
     public record BankResult(String bankTransactionId, UUID reference, String type, long amount,
                              Status status, String reason) {}
 
+    private record WithdrawalRequested(UUID withdrawalId, UUID walletId, UUID userId, long amount, String currency) {}
+    private record WithdrawalSettled(UUID withdrawalId, UUID walletId, UUID userId, long amount, String currency,
+                                     String failureReason) {}
+    private record DepositSettled(UUID depositId, UUID walletId, UUID userId, long amount, String currency,
+                                  String failureReason) {}
+
+    private final Outbox outbox;
     private final JdbcClient db;
     private final Wallets wallets;
     private final Idempotency idempotency;
     private final ApplicationEventPublisher events;
 
-    public BankOperations(JdbcClient db, Wallets wallets, Idempotency idempotency, ApplicationEventPublisher events) {
+    public BankOperations(JdbcClient db, Wallets wallets, Idempotency idempotency, ApplicationEventPublisher events,
+                          Outbox outbox) {
+        this.outbox = outbox;
         this.db = db;
         this.wallets = wallets;
         this.idempotency = idempotency;
@@ -68,14 +78,16 @@ public class BankOperations {
                     .params(id, wallet, kind.name(), amount, now).update();
             if (kind == OperationKind.WITHDRAWAL) {
                 post(id, kind, wallet, systemAccount("PAYOUT_HOLD"), amount, "WITHDRAWAL");
+                outbox.append("withdrawal.requested", id, now.toInstant(),
+                        new WithdrawalRequested(id, wallet, user, amount, "USD"));
             }
             events.publishEvent(new Submission(id, kind.bankType, amount));
             return new Idempotency.Resource(id, new Operation(id, amount, "USD", Status.PENDING, null, now.toInstant(), null));
         });
     }
 
-    private void lockWallet(UUID wallet) {
-        db.sql("select id from wallets where id=? for update").param(wallet).query(UUID.class).single();
+    private UUID lockWallet(UUID wallet) {
+        return db.sql("select user_id from wallets where id=? for update").param(wallet).query(UUID.class).single();
     }
 
     private UUID systemAccount(String name) {
@@ -109,7 +121,7 @@ public class BankOperations {
             throw WalletProblems.invalid("body", "Bank transaction does not match the operation");
         }
         if (result.status == Status.PENDING) return;
-        lockWallet(row.wallet);
+        UUID user = lockWallet(row.wallet);
         boolean succeeded = result.status == Status.SUCCEEDED;
         if (row.kind == OperationKind.WITHDRAWAL) {
             post(result.reference, row.kind, systemAccount("PAYOUT_HOLD"),
@@ -118,8 +130,18 @@ public class BankOperations {
         } else if (succeeded) {
             post(result.reference, row.kind, systemAccount("EXTERNAL_BANK"), row.wallet, row.amount, "DEPOSIT");
         }
-        db.sql("update bank_operations set status=?,failure_reason=?,completed_at=clock_timestamp() where id=?")
-                .params(result.status.name(), succeeded ? null : result.reason, result.reference).update();
+        String reason = succeeded ? null : result.reason;
+        Instant completedAt = db.sql("""
+                update bank_operations set status=?,failure_reason=?,completed_at=clock_timestamp() where id=?
+                returning completed_at
+                """).params(result.status.name(), reason, result.reference).query(Timestamp.class).single().toInstant();
+        if (row.kind == OperationKind.WITHDRAWAL) {
+            outbox.append(succeeded ? "withdrawal.succeeded" : "withdrawal.failed", result.reference, completedAt,
+                    new WithdrawalSettled(result.reference, row.wallet, user, row.amount, "USD", reason));
+        } else {
+            outbox.append(succeeded ? "deposit.succeeded" : "deposit.failed", result.reference, completedAt,
+                    new DepositSettled(result.reference, row.wallet, user, row.amount, "USD", reason));
+        }
     }
 
     private static Operation read(ResultSet rs, int index) throws SQLException {

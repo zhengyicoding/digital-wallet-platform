@@ -9,6 +9,17 @@ spring:
       allow-coercion-of-scalars: false
     deserialization:
       accept-float-as-int: false
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        "[enable.idempotence]": true
+        "[max.block.ms]": 3000
+        "[request.timeout.ms]": 3000
+        "[delivery.timeout.ms]": 10000
   datasource:
     url: ${WALLET_DB_URL:jdbc:postgresql://localhost:5432/wallet_db}
     username: ${WALLET_DB_USER:wallet_user}

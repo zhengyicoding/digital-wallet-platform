@@ -194,29 +194,7 @@ class WalletCoreTest {
     long scalar(String sql) { return db.sql(sql).query(Long.class).single(); }
 
     void invariants() {
-        // LED-5, INV-1..6. All writers have joined before reading committed rows.
-        assertThat(scalar("select coalesce(sum(amount),0) from ledger_entries")).isZero();
-        assertThat(scalar("""
-                select count(*) from (select p.id from postings p left join ledger_entries e on p.id=e.posting_id
-                group by p.id having count(e.id)<>2 or sum(e.amount)<>0) invalid
-                """)).isZero();
-        assertThat(scalar("""
-                select count(*) from accounts a where balance <>
-                (select coalesce(sum(amount),0) from ledger_entries where account_id=a.id)
-                """)).isZero();
-        assertThat(scalar("select count(*) from accounts where system_name is distinct from 'EXTERNAL_BANK' and balance<0")).isZero();
-        assertThat(scalar("select balance from accounts where system_name='PAYOUT_HOLD'")).isEqualTo(scalar(
-                "select coalesce(sum(amount),0) from bank_operations where kind='WITHDRAWAL' and status='PENDING'"));
-        assertThat(scalar("select balance from accounts where system_name='EXTERNAL_BANK'")).isEqualTo(scalar("""
-                select coalesce(sum(case when kind='DEPOSIT' then -amount else amount end),0)
-                from bank_operations where status='SUCCEEDED'
-                """) - seededDeposits.get());
-        assertThat(scalar("""
-                select count(*) from (select balance_after,sum(amount) over
-                (partition by account_id order by e.created_at,e.id) running from ledger_entries e
-                join accounts a on a.id=e.account_id where a.wallet_id is not null) s
-                where balance_after is distinct from running
-                """)).isZero();
+        WalletInvariantAssertions.verify(db, seededDeposits.get());
     }
 
     @Test void acc2_1_opposingTransfers_CON1_CON3() throws Exception {
@@ -316,6 +294,52 @@ class WalletCoreTest {
         assertThat(retry.location).isEqualTo(original.location);
         assertThat(retry.replayed).isEqualTo("true");
         assertSingleTransfer(from, to, 9);
+        var events = payloads(original, "transfer.completed");
+        assertThat(events).containsExactly(json.readTree("""
+                {"transferId":"%s","amount":9,"currency":"USD","note":"Lunch",
+                 "from":{"walletId":"%s","userId":"%s","displayName":"Name %s"},
+                 "to":{"walletId":"%s","userId":"%s","displayName":"Name %s"}}
+                """.formatted(original.body.required("id").asText(),
+                from.wallet, userId(from), from.username, to.wallet, userId(to), to.username)));
+    }
+
+    UUID userId(Customer owner) {
+        return db.sql("select user_id from wallets where id=?").param(owner.wallet).query(UUID.class).single();
+    }
+
+    // EVT-1: compare every committed envelope for this operation, including after API or webhook replay.
+    List<JsonNode> payloads(Reply operation, String... types) throws Exception {
+        var id = UUID.fromString(operation.body.required("id").asText());
+        var rows = db.sql("select event_id,envelope::text from outbox where aggregate_id=? order by sequence_id")
+                .param(id).query((rs, n) -> Map.entry(rs.getObject("event_id", UUID.class), rs.getString("envelope"))).list();
+        assertThat(rows).hasSize(types.length);
+        var result = new ArrayList<JsonNode>();
+        for (int i = 0; i < types.length; i++) {
+            var envelope = json.readTree(rows.get(i).getValue());
+            assertThat(envelope.size()).isEqualTo(6);
+            assertThat(envelope.required("eventId").asText()).isEqualTo(rows.get(i).getKey().toString());
+            assertThat(envelope.required("aggregateId").asText()).isEqualTo(id.toString());
+            assertThat(envelope.required("type").asText()).isEqualTo(types[i]);
+            assertThat(envelope.required("version")).isEqualTo(json.getNodeFactory().numberNode(1));
+            Instant.parse(envelope.required("occurredAt").textValue());
+            result.add(envelope.required("payload"));
+        }
+        return result;
+    }
+
+    void assertBankEvents(Customer owner, Reply operation, String kind, String outcome) throws Exception {
+        var requested = json.createObjectNode().put(kind + "Id", operation.body.required("id").asText())
+                .put("walletId", owner.wallet.toString()).put("userId", userId(owner).toString())
+                .put("currency", "USD");
+        requested.set("amount", operation.body.required("amount"));
+        var settled = requested.deepCopy();
+        settled.put("failureReason", outcome.equals("failed") ? "DECLINED" : null);
+        String type = kind + "." + outcome;
+        if (kind.equals("deposit")) {
+            assertThat(payloads(operation, type)).containsExactly(settled);
+        } else {
+            assertThat(payloads(operation, "withdrawal.requested", type)).containsExactly(requested, settled);
+        }
     }
 
     @Test void scopedKeysAndPendingSnapshot_IDM2() throws Exception {
@@ -356,7 +380,7 @@ class WalletCoreTest {
         send(from, to, 1, "a".repeat(64)).ok(201);
     }
 
-    @Test void commitFailureRollsBackTransferAndKey_IDM3_IDM4() throws Exception {
+    @Test void commitFailureRollsBackTransferKeyAndEvent_IDM3_IDM4_EVT1() throws Exception {
         var from = customer(9);
         var to = customer(0);
         db.sql("create sequence fail_commit_attempt").update();
@@ -372,9 +396,11 @@ class WalletCoreTest {
                     deferrable initially deferred for each row when (new.request_key='rollback-once')
                     execute function fail_first_commit()
                 """).update();
+        long before = scalar("select count(*) from outbox");
         var failure = mvc.perform(transferRequest(to, 9, "rollback-once").header("Authorization", "Bearer " + from.token))
                 .andReturn().getResponse();
         assertThat(failure.getStatus()).isEqualTo(500);
+        assertThat(scalar("select count(*) from outbox")).isEqualTo(before);
         assertThat(scalar("select count(*) from idempotency_records where request_key='rollback-once'")).isZero();
         assertThat(db.sql("select count(*) from transfers where from_wallet_id=?").param(from.wallet)
                 .query(Long.class).single()).isZero();
@@ -575,6 +601,7 @@ class WalletCoreTest {
         var owner = customer(0);
         var original = create(owner, "deposits", 90, "deposit");
         assertThat(original.ok(202).required("status").asText()).isEqualTo("PENDING");
+        assertThat(payloads(original)).isEmpty();
         funds(owner, 0, 0, 0);
         assertThat(call(get("/api/v1/wallets/me/entries"), owner.token).ok(200).required("items")).isEmpty();
         String id = original.body.required("id").asText();
@@ -587,6 +614,7 @@ class WalletCoreTest {
         replay.ok(202);
         assertThat(replay.rawBody).isEqualTo(original.rawBody);
         assertThat(replay.replayed).isEqualTo("true");
+        assertBankEvents(owner, original, "deposit", "succeeded");
         invariants();
     }
 
@@ -598,6 +626,7 @@ class WalletCoreTest {
         assertThat(call(get(original.location), owner.token).ok(200).path("status").asText()).isEqualTo("PENDING");
         funds(owner, 0, 0, 0);
         webhook(original, "CHARGE", "FAILED", 0, "test-webhook-secret").ok(200);
+        assertBankEvents(owner, original, "deposit", "failed");
         assertThat(call(get(original.location), owner.token).ok(200).path("failureReason").asText()).isEqualTo("DECLINED");
         assertThat(call(get("/api/v1/wallets/me/entries"), owner.token).ok(200).path("items")).isEmpty();
         invariants();
@@ -616,6 +645,9 @@ class WalletCoreTest {
         var replay = create(owner, "withdrawals", 300, "second");
         replay.ok(202);
         assertThat(replay.rawBody).isEqualTo(declined.rawBody);
+        webhook(declined, "PAYOUT", "FAILED", 0, "test-webhook-secret").ok(200);
+        assertBankEvents(owner, success, "withdrawal", "succeeded");
+        assertBankEvents(owner, declined, "withdrawal", "failed");
         assertThat(call(get(declined.location), owner.token).ok(200).required("status").asText()).isEqualTo("FAILED");
         var reversal = call(get("/api/v1/wallets/me/entries?type=WITHDRAWAL_REVERSAL"), owner.token)
                 .ok(200).required("items").get(0);

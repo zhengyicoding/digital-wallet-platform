@@ -9,6 +9,7 @@ import com.acme.wallet.api.WalletProblems.Failure;
 import com.acme.wallet.api.WalletProblems.Kind;
 import com.acme.wallet.idempotency.Idempotency;
 import com.acme.wallet.ledger.Wallets;
+import com.acme.wallet.outbox.Outbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -20,12 +21,17 @@ public class Transfers {
     private final JdbcClient db;
     private final Wallets wallets;
     private final Idempotency idempotency;
+    private final Outbox outbox;
 
-    public Transfers(JdbcClient db, Wallets wallets, Idempotency idempotency) {
+    public Transfers(JdbcClient db, Wallets wallets, Idempotency idempotency, Outbox outbox) {
         this.db = db;
         this.wallets = wallets;
         this.idempotency = idempotency;
+        this.outbox = outbox;
     }
+
+    private record Party(UUID walletId, UUID userId, String displayName) {}
+    private record Completed(UUID transferId, long amount, String currency, String note, Party from, Party to) {}
 
     public record Request(UUID toWalletId, Long amount, String note) {}
     public record Transfer(UUID id, UUID fromWalletId, UUID toWalletId, long amount, String currency,
@@ -48,8 +54,9 @@ public class Transfers {
         UUID from = wallets.id(userId);
         UUID to = request.toWalletId;
         if (from.equals(to)) throw new Failure(Kind.SAME_WALLET);
-        var locked = db.sql("select id from wallets where id in (?,?) order by id for update")
-                .params(from, to).query(UUID.class).list();
+        var locked = db.sql("""
+                select id as wallet_id,user_id,display_name from wallets where id in (?,?) order by id for update
+                """).params(from, to).query(Party.class).list();
         if (locked.size() != 2) throw new Failure(Kind.RECIPIENT_NOT_FOUND);
 
         // A fresh READ COMMITTED statement after acquiring both locks sees every preceding transfer.
@@ -65,6 +72,9 @@ public class Transfers {
                 values (?,?,?,'TRANSFER_OUT',?,?,?), (?,?,?,'TRANSFER_IN',?,?,?)
                 """).params(Wallets.newId(), id, from, -amount, to, request.note,
                             Wallets.newId(), id, to, amount, from, request.note).update();
+        boolean senderFirst = locked.getFirst().walletId.equals(from);
+        outbox.append("transfer.completed", id, now.toInstant(), new Completed(id, amount, "USD", request.note,
+                senderFirst ? locked.getFirst() : locked.getLast(), senderFirst ? locked.getLast() : locked.getFirst()));
         return new Transfer(id, from, to, amount, "USD", request.note, "COMPLETED", now.toInstant());
     }
 
