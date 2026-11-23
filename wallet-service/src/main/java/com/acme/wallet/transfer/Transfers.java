@@ -10,7 +10,6 @@ import com.acme.wallet.api.WalletProblems.Kind;
 import com.acme.wallet.idempotency.Idempotency;
 import com.acme.wallet.ledger.Wallets;
 import com.fasterxml.jackson.databind.JsonNode;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -21,19 +20,11 @@ public class Transfers {
     private final JdbcClient db;
     private final Wallets wallets;
     private final Idempotency idempotency;
-    private final long minAmount;
-    private final long maxAmount;
-    private final long dailyLimit;
 
-    public Transfers(JdbcClient db, Wallets wallets, Idempotency idempotency,
-                     @Value("${wallet.min-amount}") long minAmount, @Value("${wallet.max-amount}") long maxAmount,
-                     @Value("${wallet.daily-limit}") long dailyLimit) {
+    public Transfers(JdbcClient db, Wallets wallets, Idempotency idempotency) {
         this.db = db;
         this.wallets = wallets;
         this.idempotency = idempotency;
-        this.minAmount = minAmount;
-        this.maxAmount = maxAmount;
-        this.dailyLimit = dailyLimit;
     }
 
     public record Request(UUID toWalletId, Long amount, String note) {}
@@ -49,9 +40,7 @@ public class Transfers {
 
     private Transfer post(UUID userId, Request request) {
         if (request.toWalletId == null) throw WalletProblems.invalid("toWalletId", "Supply the recipient wallet ID");
-        if (request.amount == null || request.amount < minAmount || request.amount > maxAmount) {
-            throw WalletProblems.invalid("amount", "Amount is outside the allowed range");
-        }
+        long amount = wallets.amount(request.amount);
         if (request.note != null && (request.note.codePointCount(0, request.note.length()) > 140
                 || request.note.indexOf(0) >= 0)) {
             throw WalletProblems.invalid("note", "Use up to 140 text characters");
@@ -65,13 +54,7 @@ public class Transfers {
 
         // A fresh READ COMMITTED statement after acquiring both locks sees every preceding transfer.
         Timestamp now = db.sql("select clock_timestamp()").query(Timestamp.class).single();
-        var funds = db.sql("select a.balance, " + Wallets.SENT_TODAY + """
-                 as sent from wallets w join accounts a on a.wallet_id=w.id where w.id=:id
-                """).param("asOf", now).param("id", from)
-                .query((rs, n) -> new Funds(rs.getLong("balance"), rs.getLong("sent"))).single();
-        long amount = request.amount;
-        if (funds.balance < amount) throw new Failure(Kind.INSUFFICIENT_FUNDS);
-        if (dailyLimit - funds.sent < amount) throw new Failure(Kind.DAILY_LIMIT_EXCEEDED);
+        wallets.checkSpending(from, amount, now);
 
         UUID id = Wallets.newId();
         db.sql("insert into transfers(id,from_wallet_id,to_wallet_id,amount,note,created_at) values (?,?,?,?,?,?)")
@@ -84,8 +67,6 @@ public class Transfers {
                             Wallets.newId(), id, to, amount, from, request.note).update();
         return new Transfer(id, from, to, amount, "USD", request.note, "COMPLETED", now.toInstant());
     }
-
-    private record Funds(long balance, long sent) {}
 
     public Transfer get(UUID userId, UUID id) {
         return db.sql("""

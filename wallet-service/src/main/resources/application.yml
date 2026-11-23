@@ -46,3 +46,9 @@ wallet:
   min-amount: ${WALLET_MIN_AMOUNT:1}
   max-amount: ${WALLET_MAX_AMOUNT:200000}
   daily-limit: ${WALLET_DAILY_LIMIT:500000}
+
+bank:
+  base-url: ${BANK_BASE_URL:http://localhost:8083}
+  api-key: ${BANK_API_KEY}
+  webhook-secret: ${BANK_WEBHOOK_SECRET}
+  timeout: ${BANK_TIMEOUT:3s}

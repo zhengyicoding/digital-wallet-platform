@@ -36,6 +36,7 @@ public class WalletProblems {
         IDEMPOTENCY_KEY_REQUIRED(HttpStatus.BAD_REQUEST, "Supply an Idempotency-Key of 1 to 64 characters"),
         IDEMPOTENCY_KEY_REUSED(HttpStatus.UNPROCESSABLE_ENTITY, "This key was used with a different request body"),
         REQUEST_IN_PROGRESS(HttpStatus.CONFLICT, "A request with this key is in progress"),
+        INVALID_SIGNATURE(HttpStatus.UNAUTHORIZED, "Invalid webhook signature or timestamp"),
         UNAUTHENTICATED(HttpStatus.UNAUTHORIZED, "A valid access token is required"),
         FORBIDDEN(HttpStatus.FORBIDDEN, "The required role is missing"),
         NOT_FOUND(HttpStatus.NOT_FOUND, "Resource was not found"),

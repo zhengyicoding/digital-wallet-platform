@@ -41,7 +41,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   (BNK-5), idempotency by reference (BNK-2), settlement after `settleDelayMs`, signed webhook delivery with
   `webhookCopies` (50–200 ms spacing), admin config/transactions/reset endpoints, runtime failure injection (BNK-6).
   Springdoc at `/docs/bank/`. Standalone — no wallet-service dependency.
-- [ ] **M5 deposits + withdrawals**: wallet-side deposit (DEP-1..3) and withdrawal (WDR-1..4) flows. Bank client with
+- [x] **M5 deposits + withdrawals**: wallet-side deposit (DEP-1..3) and withdrawal (WDR-1..4) flows. Bank client with
   response timeout (3s default), bounded retries with exponential backoff + jitter, circuit breaker (Resilience4j).
   Calls outside DB transactions (CON-5). Shared "apply result" code path: lock operation row, check still PENDING,
   post ledger entries, set final status, all in one transaction (RES-6). Webhook endpoint POST
@@ -116,3 +116,12 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   Compose startup passed; the rebuilt simulator was healthy, a smoke charge settled successfully, and nginx
   served `/docs/bank/` and the bank OpenAPI schema successfully. Existing internal `/bank/v1/**` routing remains
   unchanged. Wallet bank integration, webhook receiving, deposits and withdrawals remain in M5.
+
+- 2026-11-23 — M5 complete. Deposits and withdrawals store the original 202 response at creation. Withdrawals
+  reserve funds atomically and share the transfer spending check. Bank submission runs after commit. Signed
+  webhooks and definitive submission responses use the same row-locked settlement transaction (DEP-1..3,
+  WDR-1..4, CON-5, IDM-1..7, RES-1..6/9, SEC-4). Root `./mvnw -q verify` passed all 37 tests with zero skips.
+  Five new PostgreSQL tests cover ACC-2 #9/#10, withdrawal settlement and reversal, original-response replay,
+  timeout/503 retries with funds held, and transfers racing withdrawals for funds and daily allowance.
+  Compose settled a 10,000-cent deposit and 2,000-cent withdrawal and replayed both original responses.
+  M6 adds the outbox and Kafka publication. M10 adds reconciliation and restart recovery for pending operations.

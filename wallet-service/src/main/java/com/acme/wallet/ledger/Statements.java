@@ -19,13 +19,13 @@ public class Statements {
                         String referenceType, UUID referenceId, Instant createdAt) {}
     public record Page(List<Entry> items, String nextCursor) {}
 
-    private record Cursor(Instant time, UUID id) {
-        String encode() {
+    public record Cursor(Instant time, UUID id) {
+        public String encode() {
             return Base64.getUrlEncoder().withoutPadding().encodeToString(
                     (time + "/" + id).getBytes(StandardCharsets.US_ASCII));
         }
 
-        static Cursor decode(String value) {
+        public static Cursor decode(String value) {
             try {
                 if (value.length() > 128) throw new IllegalArgumentException();
                 String[] fields = new String(Base64.getUrlDecoder().decode(value), StandardCharsets.US_ASCII).split("/", -1);
@@ -34,7 +34,7 @@ public class Statements {
                 if (!cursor.encode().equals(value)) throw new IllegalArgumentException();
                 return cursor;
             } catch (RuntimeException ex) {
-                throw WalletProblems.invalid("cursor", "Invalid statement cursor");
+                throw WalletProblems.invalid("cursor", "Invalid cursor");
             }
         }
     }

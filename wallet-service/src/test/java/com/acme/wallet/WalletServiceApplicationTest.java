@@ -7,6 +7,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+@org.springframework.test.context.ActiveProfiles("test")
 @SpringBootTest
 @Testcontainers
 class WalletServiceApplicationTest {
