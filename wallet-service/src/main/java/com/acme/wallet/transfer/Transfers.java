@@ -1,6 +1,5 @@
 package com.acme.wallet.transfer;
 
-import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.UUID;
@@ -8,30 +7,30 @@ import java.util.UUID;
 import com.acme.wallet.api.WalletProblems;
 import com.acme.wallet.api.WalletProblems.Failure;
 import com.acme.wallet.api.WalletProblems.Kind;
+import com.acme.wallet.idempotency.Idempotency;
 import com.acme.wallet.ledger.Wallets;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class Transfers {
     private final JdbcClient db;
     private final Wallets wallets;
-    private final TransactionTemplate transaction;
+    private final Idempotency idempotency;
     private final long minAmount;
     private final long maxAmount;
     private final long dailyLimit;
 
-    public Transfers(JdbcClient db, Wallets wallets, PlatformTransactionManager manager,
+    public Transfers(JdbcClient db, Wallets wallets, Idempotency idempotency,
                      @Value("${wallet.min-amount}") long minAmount, @Value("${wallet.max-amount}") long maxAmount,
                      @Value("${wallet.daily-limit}") long dailyLimit) {
         this.db = db;
         this.wallets = wallets;
-        this.transaction = new TransactionTemplate(manager);
-        this.transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.idempotency = idempotency;
         this.minAmount = minAmount;
         this.maxAmount = maxAmount;
         this.dailyLimit = dailyLimit;
@@ -41,7 +40,14 @@ public class Transfers {
     public record Transfer(UUID id, UUID fromWalletId, UUID toWalletId, long amount, String currency,
                            String note, String status, Instant createdAt) {}
 
-    public Transfer send(UUID userId, Request request) {
+    public ResponseEntity<byte[]> send(UUID userId, String key, JsonNode body) {
+        return idempotency.execute(userId, "/api/v1/transfers", key, body, Request.class, HttpStatus.CREATED, request -> {
+            var transfer = post(userId, request);
+            return new Idempotency.Resource(transfer.id, transfer);
+        });
+    }
+
+    private Transfer post(UUID userId, Request request) {
         if (request.toWalletId == null) throw WalletProblems.invalid("toWalletId", "Supply the recipient wallet ID");
         if (request.amount == null || request.amount < minAmount || request.amount > maxAmount) {
             throw WalletProblems.invalid("amount", "Amount is outside the allowed range");
@@ -50,24 +56,6 @@ public class Transfers {
                 || request.note.indexOf(0) >= 0)) {
             throw WalletProblems.invalid("note", "Use up to 140 text characters");
         }
-        for (int attempt = 0; ; attempt++) {
-            try {
-                return transaction.execute(status -> post(userId, request));
-            } catch (RuntimeException failure) {
-                if (attempt >= 3 || !retryable(failure)) throw failure;
-            }
-        }
-    }
-
-    private static boolean retryable(Throwable cause) {
-        for (; cause != null; cause = cause.getCause()) {
-            if (cause instanceof SQLException sql &&
-                    ("40001".equals(sql.getSQLState()) || "40P01".equals(sql.getSQLState()))) return true;
-        }
-        return false;
-    }
-
-    private Transfer post(UUID userId, Request request) {
         UUID from = wallets.id(userId);
         UUID to = request.toWalletId;
         if (from.equals(to)) throw new Failure(Kind.SAME_WALLET);

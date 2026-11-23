@@ -1,12 +1,15 @@
 package com.acme.wallet.api;
 
-import java.net.URI;
 import java.util.UUID;
 
 import com.acme.wallet.ledger.Statements;
 import com.acme.wallet.ledger.Wallets;
 import com.acme.wallet.transfer.Transfers;
+import com.fasterxml.jackson.databind.JsonNode;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.enums.SecuritySchemeType;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.security.SecurityScheme;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -59,15 +62,16 @@ class WalletController {
         return statements.list(caller(jwt), type, limit, cursor);
     }
 
-    @ApiResponse(responseCode = "201", description = "Transfer completed", useReturnTypeSchema = true)
+    @ApiResponse(responseCode = "201", description = "Transfer completed",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = Transfers.Transfer.class)))
     @PostMapping("/transfers")
-    ResponseEntity<Transfers.Transfer> send(@AuthenticationPrincipal Jwt jwt,
-            @RequestHeader(name="Idempotency-Key", required=false) String key, @RequestBody Transfers.Request request) {
-        if (key == null || key.isEmpty() || key.codePointCount(0, key.length()) > 64) {
-            throw new WalletProblems.Failure(WalletProblems.Kind.IDEMPOTENCY_KEY_REQUIRED);
-        }
-        var transfer = transfers.send(caller(jwt), request);
-        return ResponseEntity.created(URI.create("/api/v1/transfers/" + transfer.id())).body(transfer);
+    ResponseEntity<byte[]> send(@AuthenticationPrincipal Jwt jwt,
+            @Parameter(required = true, schema = @Schema(minLength = 1, maxLength = 64))
+            @RequestHeader(name="Idempotency-Key", required=false) String key,
+            @io.swagger.v3.oas.annotations.parameters.RequestBody(content = @Content(
+                    mediaType = "application/json", schema = @Schema(implementation = Transfers.Request.class)))
+            @RequestBody JsonNode request) {
+        return transfers.send(caller(jwt), key, request);
     }
 
     @GetMapping("/transfers/{id}")

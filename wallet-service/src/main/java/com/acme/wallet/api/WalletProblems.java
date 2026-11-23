@@ -34,6 +34,8 @@ public class WalletProblems {
         INSUFFICIENT_FUNDS(HttpStatus.UNPROCESSABLE_ENTITY, "Insufficient balance"),
         DAILY_LIMIT_EXCEEDED(HttpStatus.UNPROCESSABLE_ENTITY, "Daily limit exceeded"),
         IDEMPOTENCY_KEY_REQUIRED(HttpStatus.BAD_REQUEST, "Supply an Idempotency-Key of 1 to 64 characters"),
+        IDEMPOTENCY_KEY_REUSED(HttpStatus.UNPROCESSABLE_ENTITY, "This key was used with a different request body"),
+        REQUEST_IN_PROGRESS(HttpStatus.CONFLICT, "A request with this key is in progress"),
         UNAUTHENTICATED(HttpStatus.UNAUTHORIZED, "A valid access token is required"),
         FORBIDDEN(HttpStatus.FORBIDDEN, "The required role is missing"),
         NOT_FOUND(HttpStatus.NOT_FOUND, "Resource was not found"),
@@ -67,6 +69,10 @@ public class WalletProblems {
         var body = problem(failure.kind);
         if (failure.kind == Kind.VALIDATION_FAILED) {
             body.setProperty("errors", failure.errors);
+        }
+        if (failure.kind == Kind.REQUEST_IN_PROGRESS) {
+            return ResponseEntity.status(body.getStatus()).header("Retry-After", "1")
+                    .contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
         }
         return response(body);
     }

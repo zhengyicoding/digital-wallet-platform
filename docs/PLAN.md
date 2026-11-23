@@ -34,7 +34,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   retry (3+), daily limit, cursor pagination `(createdAt, id)`, resource-server security (validate JWT signature, exp,
   iss), springdoc at `/docs/wallet/`. Testcontainers concurrency tests (ACC-2 #1, #2, #6, #8) and authorization
   tests (ACC-2 #7 for wallet endpoints — cross-user requests return 404).
-- [ ] **M3 idempotency**: table + unique constraint, same-transaction write (IDM-4), replay header
+- [x] **M3 idempotency**: table + unique constraint, same-transaction write (IDM-4), replay header
   `Idempotent-Replayed: true` (IDM-2), 422 IDEMPOTENCY_KEY_REUSED (IDM-5), 409 REQUEST_IN_PROGRESS with
   `Retry-After: 1` (IDM-6). Tests: ACC-2 #3, #4, #5.
 - [ ] **M4 bank-simulator**: BNK-1..6. In-memory transaction store, POST/GET `/bank/v1/transactions`, X-Api-Key auth
@@ -101,3 +101,9 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   transfer portion of #7, and #8, including INV-1..6 assertions. Transfers validate the idempotency header.
   M3 adds key storage and replay. M5 supplies pending reservations and withdrawal contributions to the UTC daily
   total. Tests use balanced funding fixtures until deposits land. M6 adds the transactional outbox.
+- 2026-11-23 — M3 complete. Transfers enforce IDM-1 through IDM-7 with a PostgreSQL transaction-scoped advisory
+  lock and a primary key on user, endpoint, and request key. The original status, JSON body, and Location commit
+  with the ledger and are retained indefinitely. M5 can reuse the same code to replay its original 202 PENDING
+  response after settlement. Root `./mvnw -q verify` passed all 25 tests with zero skips, including six new
+  PostgreSQL tests for ACC-2 #3–5, key validation and scoping, and reuse after rejection or commit failure.
+  All nine M2 integration tests passed, including opposing transfers and fresh-transaction retries (CON-3).

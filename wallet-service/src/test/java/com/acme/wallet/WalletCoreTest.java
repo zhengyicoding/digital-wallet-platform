@@ -7,7 +7,9 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntConsumer;
+import javax.sql.DataSource;
 
+import com.acme.wallet.idempotency.Idempotency;
 import com.acme.wallet.ledger.Wallets;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,6 +24,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -48,6 +51,8 @@ class WalletCoreTest {
     @Autowired ObjectMapper json;
     @Autowired JdbcClient db;
     @Autowired TransactionTemplate tx;
+    @Autowired Idempotency idempotency;
+    @Autowired DataSource dataSource;
 
     @DynamicPropertySource
     static void keys(DynamicPropertyRegistry registry) throws Exception {
@@ -67,7 +72,7 @@ class WalletCoreTest {
     @AfterAll static void stopKeys() { jwks.stop(0); }
 
     record Customer(String username, String token, UUID wallet) {}
-    record Reply(int status, JsonNode body, String location) {
+    record Reply(int status, JsonNode body, String rawBody, String location, String replayed, String retryAfter) {
         void code(int expected, String code) {
             assertThat(status).as(body.toString()).isEqualTo(expected);
             assertThat(body.path("code").asText()).isEqualTo(code);
@@ -86,7 +91,9 @@ class WalletCoreTest {
             var result = mvc.perform(request).andReturn();
             var response = result.getResponse();
             if (response.getStatus() >= 500) throw new AssertionError("Unexpected server error", result.getResolvedException());
-            return new Reply(response.getStatus(), json.readTree(response.getContentAsByteArray()), response.getHeader("Location"));
+            String rawBody = response.getContentAsString(StandardCharsets.UTF_8);
+            return new Reply(response.getStatus(), json.readTree(rawBody), rawBody, response.getHeader("Location"),
+                    response.getHeader("Idempotent-Replayed"), response.getHeader("Retry-After"));
         } catch (Exception ex) {
             throw new AssertionError(ex);
         }
@@ -126,10 +133,18 @@ class WalletCoreTest {
     }
 
     Reply send(Customer from, Customer to, long amount) {
-        return call(post("/api/v1/transfers").header("Idempotency-Key", UUID.randomUUID())
-                .contentType("application/json").content("""
-                        {"toWalletId":"%s","amount":%d,"note":"Lunch"}
-                        """.formatted(to.wallet, amount)), from.token);
+        return send(from, to, amount, UUID.randomUUID().toString());
+    }
+
+    Reply send(Customer from, Customer to, long amount, String key) {
+        return call(transferRequest(to, amount, key), from.token);
+    }
+
+    MockHttpServletRequestBuilder transferRequest(Customer to, long amount, String key) {
+        var request = post("/api/v1/transfers").contentType("application/json").content("""
+                {"toWalletId":"%s","amount":%d,"note":"Lunch"}
+                """.formatted(to.wallet, amount));
+        return key == null ? request : request.header("Idempotency-Key", key);
     }
 
     static void parallel(int threads, int count, IntConsumer task) throws Exception {
@@ -196,6 +211,142 @@ class WalletCoreTest {
         });
         assertThat(completed.get()).isEqualTo(10);
         assertThat(call(get("/api/v1/wallets/me"),from.token).ok(200).get("balance").asLong()).isZero();
+        invariants();
+    }
+
+    @Test void acc2_3_tenSimultaneousRequests_IDM2_IDM6() throws Exception {
+        var from = customer(100);
+        var to = customer(0);
+        try (var pool = Executors.newFixedThreadPool(10); var blocker = dataSource.getConnection()) {
+            // Hold the winner inside its transfer until the other nine HTTP requests have answered.
+            blocker.setAutoCommit(false);
+            try (var lock = blocker.prepareStatement("select id from wallets where id=? for update")) {
+                lock.setObject(1, from.wallet);
+                lock.executeQuery().close();
+            }
+            var replies = new ExecutorCompletionService<Reply>(pool);
+            var start = new CyclicBarrier(10);
+            for (int i = 0; i < 10; i++) {
+                replies.submit(() -> {
+                    start.await(10, TimeUnit.SECONDS);
+                    return send(from, to, 9, "simultaneous");
+                });
+            }
+            for (int i = 0; i < 9; i++) {
+                var next = replies.poll(10, TimeUnit.SECONDS);
+                assertThat(next).as("duplicate answered while the wallet was locked").isNotNull();
+                var reply = next.get();
+                reply.code(409, "REQUEST_IN_PROGRESS");
+                assertThat(reply.retryAfter).isEqualTo("1");
+            }
+            blocker.commit();
+            var winner = replies.poll(10, TimeUnit.SECONDS).get();
+            winner.ok(201);
+            assertThat(winner.replayed).isNull();
+        }
+        assertSingleTransfer(from, to, 9);
+        invariants();
+    }
+
+    void assertSingleTransfer(Customer from, Customer to, long amount) {
+        var id = db.sql("select id from transfers where from_wallet_id=?").param(from.wallet).query(UUID.class).single();
+        var posting = db.sql("select id from postings where reference_type='TRANSFER' and reference_id=?")
+                .param(id).query(UUID.class).single();
+        assertThat(db.sql("select amount from ledger_entries where posting_id=? order by amount")
+                .param(posting).query(Long.class).list()).containsExactly(-amount, amount);
+        assertThat(call(get("/api/v1/wallets/me"), to.token).ok(200).path("balance").asLong()).isEqualTo(amount);
+    }
+
+    @Test void acc2_4_changedAmount_IDM5() throws Exception {
+        var from = customer(100);
+        var to = customer(0);
+        send(from, to, 9, "changed").ok(201);
+        send(from, to, 10, "changed").code(422, "IDEMPOTENCY_KEY_REUSED");
+        assertSingleTransfer(from, to, 9);
+    }
+
+    @Test void acc2_5_retryAfterLostResponse_IDM2_IDM4() throws Exception {
+        var from = customer(9);
+        var to = customer(0);
+        var original = send(from, to, 9, "lost");
+        original.ok(201);
+        assertThat(original.replayed).isNull();
+        // The retry uses only the original request. The first transfer has exhausted the balance.
+        var retry = call(post("/api/v1/transfers").header("Idempotency-Key", "lost").contentType("application/json")
+                .content("""
+                        {"note":"Lunch","amount":9,"toWalletId":"%s"}
+                        """.formatted(to.wallet)), from.token);
+        assertThat(retry.status).isEqualTo(original.status);
+        assertThat(retry.rawBody).isEqualTo(original.rawBody);
+        assertThat(retry.location).isEqualTo(original.location);
+        assertThat(retry.replayed).isEqualTo("true");
+        assertSingleTransfer(from, to, 9);
+    }
+
+    @Test void scopedKeysAndPendingSnapshot_IDM2() throws Exception {
+        var alice = customer(10);
+        var bob = customer(10);
+        var to = customer(0);
+        String key = "scoped";
+        var first = send(alice, to, 5, key).ok(201);
+        var second = send(bob, to, 5, key).ok(201);
+        assertThat(second.path("id")).isNotEqualTo(first.path("id"));
+
+        // Exercise the shared transaction path with M5's response contract.
+        var user = db.sql("select user_id from wallets where id=?").param(alice.wallet).query(UUID.class).single();
+        var request = json.createObjectNode().put("amount", 5);
+        var id = UUID.randomUUID();
+        var operation = json.createObjectNode().put("id", id.toString()).put("status", "PENDING");
+        var accepted = idempotency.execute(user, "/api/v1/deposits", key, request, JsonNode.class,
+                HttpStatus.ACCEPTED, ignored -> new Idempotency.Resource(id, operation));
+        operation.put("status", "SUCCEEDED");
+        var retry = idempotency.execute(user, "/api/v1/deposits", key, request, JsonNode.class,
+                HttpStatus.ACCEPTED, ignored -> { throw new AssertionError("Re-executed operation"); });
+        assertThat(retry.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(retry.getBody()).isEqualTo(accepted.getBody());
+        assertThat(json.readTree(retry.getBody()).path("status").asText()).isEqualTo("PENDING");
+        assertThat(retry.getHeaders().getFirst("Idempotent-Replayed")).isEqualTo("true");
+    }
+
+    @Test void keyLengthsAndReuseAfterRejection_IDM1_IDM3() throws Exception {
+        var from = customer(2);
+        var to = customer(0);
+        for (String invalid : Arrays.asList(null, "", "a".repeat(65))) {
+            send(from, to, 1, invalid).code(400, "IDEMPOTENCY_KEY_REQUIRED");
+        }
+        send(from, to, 3, "a").code(422, "INSUFFICIENT_FUNDS");
+        var retried = send(from, to, 1, "a");
+        retried.ok(201);
+        assertThat(retried.replayed).isNull();
+        send(from, to, 1, "a".repeat(64)).ok(201);
+    }
+
+    @Test void commitFailureRollsBackTransferAndKey_IDM3_IDM4() throws Exception {
+        var from = customer(9);
+        var to = customer(0);
+        db.sql("create sequence fail_commit_attempt").update();
+        db.sql("""
+                create function fail_first_commit() returns trigger language plpgsql as $$
+                begin
+                    if nextval('fail_commit_attempt') = 1 then raise exception 'test rollback'; end if;
+                    return null;
+                end $$
+                """).update();
+        db.sql("""
+                create constraint trigger test_commit_failure after insert on idempotency_records
+                    deferrable initially deferred for each row when (new.request_key='rollback-once')
+                    execute function fail_first_commit()
+                """).update();
+        var failure = mvc.perform(transferRequest(to, 9, "rollback-once").header("Authorization", "Bearer " + from.token))
+                .andReturn().getResponse();
+        assertThat(failure.getStatus()).isEqualTo(500);
+        assertThat(scalar("select count(*) from idempotency_records where request_key='rollback-once'")).isZero();
+        assertThat(db.sql("select count(*) from transfers where from_wallet_id=?").param(from.wallet)
+                .query(Long.class).single()).isZero();
+        var retried = send(from, to, 9, "rollback-once");
+        retried.ok(201);
+        assertThat(retried.replayed).isNull();
+        assertSingleTransfer(from, to, 9);
         invariants();
     }
 
@@ -336,7 +487,7 @@ class WalletCoreTest {
     @Test void validation_MNY2_SEC5_API6() throws Exception {
         var sender = customer(5);
         for (String invalid : List.of("-1","0","1.0","1.5","200001","\"1\"","null","9223372036854775808")) {
-            call(post("/api/v1/transfers").header("Idempotency-Key","x").contentType("application/json")
+            call(post("/api/v1/transfers").header("Idempotency-Key",UUID.randomUUID()).contentType("application/json")
                     .content("{\"toWalletId\":\"" + UUID.randomUUID() + "\",\"amount\":" + invalid + "}"),sender.token)
                     .code(400,"VALIDATION_FAILED");
         }
@@ -344,7 +495,7 @@ class WalletCoreTest {
         var recipient = customer(0);
         String body = "{\"toWalletId\":\"" + recipient.wallet + "\",\"amount\":1";
         for (String badNote : List.of("true", "123", "\"" + "a".repeat(141) + "\"")) {
-            call(post("/api/v1/transfers").header("Idempotency-Key","x").contentType("application/json")
+            call(post("/api/v1/transfers").header("Idempotency-Key",UUID.randomUUID()).contentType("application/json")
                     .content(body + ",\"note\":" + badNote + "}"), sender.token).code(400,"VALIDATION_FAILED");
         }
         call(post("/api/v1/transfers").header("Idempotency-Key","optional-note").contentType("application/json")
