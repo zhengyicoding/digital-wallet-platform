@@ -88,7 +88,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 
 (Append a line per finished milestone: date, what changed, known gaps.)
 
-- 2026-04-11 — M0 complete. Verified the five-module Maven reactor, Compose startup on a fresh database volume,
+- 2026-11-23 — M0 complete. Verified the five-module Maven reactor, Compose startup on a fresh database volume,
   database isolation, readiness probes, and non-root application containers (OPS-1/2/3/9, SEC-6). CI runs Maven verify.
 - 2026-11-23 — M1 complete. Added PostgreSQL-backed registration with salted BCrypt hashes, admin bootstrap,
   RS256 login and JWKS, authenticated `/me`, and OpenAPI and Swagger UI (AUTH-1..6, API-3/6/8/9, SEC-1/2/5/6/7,
