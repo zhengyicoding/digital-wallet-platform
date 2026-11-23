@@ -27,7 +27,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 - [x] **M0 Foundation**: Maven parent + 5 module skeletons; `docker-compose.yml` with
   Postgres (db+user per service), Kafka, health checks; `.env.example` with all secrets documented; non-root
   Dockerfiles (OPS-9); CI running `verify`.
-- [ ] **M1 auth-service**: AUTH-1..6, RS256 JWT with `iss=digital-wallet-auth`, JWKS, `roles` as JSON array claim,
+- [x] **M1 auth-service**: AUTH-1..6, RS256 JWT with `iss=digital-wallet-auth`, JWKS, `roles` as JSON array claim,
   admin bootstrap from env, `/me`, Flyway, springdoc at `/docs/auth/`.
 - [ ] **M2 wallet core**: migrations (wallets, accounts, ledger_entries, postings, system accounts EXTERNAL_BANK and
   PAYOUT_HOLD), wallet open/me/lookup/entries, transfers with deterministic row-lock ordering by wallet ID, deadlock
@@ -90,3 +90,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 
 - 2026-04-11 — M0 complete. Verified the five-module Maven reactor, Compose startup on a fresh database volume,
   database isolation, readiness probes, and non-root application containers (OPS-1/2/3/9, SEC-6). CI runs Maven verify.
+- 2026-11-23 — M1 complete. Added PostgreSQL-backed registration with salted BCrypt hashes, admin bootstrap,
+  RS256 login and JWKS, authenticated `/me`, and OpenAPI and Swagger UI (AUTH-1..6, API-3/6/8/9, SEC-1/2/5/6/7,
+  OPS-2). Root `./mvnw -q verify` passed all 10 tests, including 7 auth-service tests against PostgreSQL 16.
+  Login rate limiting (SEC-9) remains scheduled for M11.
