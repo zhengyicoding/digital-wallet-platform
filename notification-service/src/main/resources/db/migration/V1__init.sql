@@ -1,0 +1,1 @@
+-- notification-service schema — populated in M7

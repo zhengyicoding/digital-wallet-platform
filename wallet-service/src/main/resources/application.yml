@@ -1,0 +1,36 @@
+server:
+  port: ${SERVER_PORT:8082}
+
+spring:
+  application:
+    name: wallet-service
+  datasource:
+    url: ${WALLET_DB_URL:jdbc:postgresql://localhost:5432/wallet_db}
+    username: ${WALLET_DB_USER:wallet_user}
+    password: ${WALLET_DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  flyway:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+
+springdoc:
+  swagger-ui:
+    path: /docs/wallet
+  api-docs:
+    path: /docs/wallet/v3/api-docs

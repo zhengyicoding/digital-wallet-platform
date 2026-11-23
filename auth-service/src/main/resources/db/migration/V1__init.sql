@@ -1,0 +1,1 @@
+-- auth-service schema — populated in M1

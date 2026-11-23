@@ -1,0 +1,36 @@
+server:
+  port: ${SERVER_PORT:8084}
+
+spring:
+  application:
+    name: notification-service
+  datasource:
+    url: ${NOTIFICATION_DB_URL:jdbc:postgresql://localhost:5432/notification_db}
+    username: ${NOTIFICATION_DB_USER:notification_user}
+    password: ${NOTIFICATION_DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  flyway:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+
+springdoc:
+  swagger-ui:
+    path: /docs/notifications
+  api-docs:
+    path: /docs/notifications/v3/api-docs

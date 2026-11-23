@@ -1,0 +1,23 @@
+server:
+  port: ${SERVER_PORT:8083}
+
+spring:
+  application:
+    name: bank-simulator
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+
+springdoc:
+  swagger-ui:
+    path: /docs/bank
+  api-docs:
+    path: /docs/bank/v3/api-docs

@@ -1,0 +1,1 @@
+-- wallet-service schema — populated in M2

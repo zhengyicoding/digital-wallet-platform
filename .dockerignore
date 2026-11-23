@@ -1,0 +1,10 @@
+.git
+.idea
+docs
+*.md
+.env
+.env.example
+web/*
+!web/pom.xml
+infra/
+**/target/
