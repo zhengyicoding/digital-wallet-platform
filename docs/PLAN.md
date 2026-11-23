@@ -54,7 +54,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   with money formatting `$1,250.00` (Section 5.8), list/unread-count/read/read-all APIs, resource-server security,
   DLT `wallet.events.dlt` for unparseable messages (NTF-4), admin stats counters (NTF-5), Flyway, springdoc at
   `/docs/notifications/`. Tests: ACC-2 #16, #17.
-- [ ] **M8 web**: SPA (customer pages UI-2, polling for pending status and notifications every 5s UI-5, error-code
+- [x] **M8 web**: SPA (customer pages UI-2, polling for pending status and notifications every 5s UI-5, error-code
   messages UI-6, fresh idempotency key per action / same key on retry UI-4, token in sessionStorage UI-7), nginx
   routing per Section 6.1 proxy table.
 - [ ] **M9 Baseline gate**: run ACC-1 B1..B7 end to end via `docker compose up --build`; fix gaps.
@@ -151,3 +151,33 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   a 10,000-cent deposit funded a 1,250-cent transfer through the M6 outbox/Kafka pipeline: both users' notification
   APIs returned exactly one transfer notification with the required text. OpenAPI and Swagger UI passed through
   `/docs/notifications/`. M8 frontend and M10 reconciliation remain scheduled as before.
+
+- 2026-11-23 — M8 complete (UI-1, UI-2, UI-4 through UI-7, SEC-8; ACC-1 B2–B6 smoke only).
+  Added a buildless customer SPA served at `/` by the existing non-root nginx container, preserving the API and
+  all four OpenAPI/Swagger routes. Includes registration/login, wallet opening and account totals, recipient
+  lookup and transfer confirmation, bank-operation status, statement running balances and cursor Load more,
+  deposit/withdrawal lists, and notification list/count/read/read-all/unread filtering. Input amounts are parsed
+  through integer arithmetic; business limits and rejection messages come from backend response codes.
+  Every new confirmed money action freezes a fresh UUID key and the serialized body. Network/5xx and
+  REQUEST_IN_PROGRESS retries retain the original request across navigation and reload. Accepted bank operations
+  poll their detail endpoints rather than trusting replayed POST snapshots. A shared refresh loop runs two
+  seconds after completion, discovers pending operations on sign-in, prevents overlapping polls, and aborts on
+  logout or authenticated 401. Session storage is cleared and login feedback remains visible. User-provided
+  text uses textContent throughout.
+  Final root `./mvnw -q verify` passed 47 tests with zero failures, errors, or skips. `npm --prefix web test`
+  passed seven dependency-free frontend tests; these now also run in CI. Compose rebuilt and all application
+  containers were healthy. Real headless Chrome against Compose passed 14 recorded browser scenarios using
+  `alice_mwtwv3c0` and `bob_mwtwv3c0`: both signups/logins and zero-balance wallets; $100 deposit PENDING to
+  SUCCEEDED; $12.50 transfer with literal `Lunch <b>for two</b>` note and both running balances/notifications;
+  $20 withdrawal with $20 reserved while PENDING, then SUCCEEDED, $67.50 available, $0 reserved, $32.50 sent
+  today and two new notifications; INSUFFICIENT_FUNDS, SAME_WALLET and WALLET_NOT_FOUND without balance changes.
+  Also exercised mark-one/read-all/unread filter, a committed deposit with a deliberately lost response followed
+  by a controlled 409, reload and idempotent replay (same key and exact 29-cent body, one credit), a fresh key
+  for the next action, 18 additional one-cent deposits for real cursor pagination without duplicates, statement
+  filtering, all four OpenAPI/Swagger routes, literal display-name rendering (controlled response fixture),
+  390px mobile layout, authenticated 401 cleanup (controlled response fixture), real invalid-login feedback,
+  delayed-count responses with no overlapping polls, and no API requests for over five seconds after logout.
+  Deposit/withdrawal refresh timings and notification waits met the UI-5 allowance. The browser script restores
+  the original bank configuration after temporarily using a two-second settlement delay. Reusable commands and
+  fixture boundaries are documented in `web/README.md`; browser script is `web/test/browser-smoke.cjs`.
+  M9 remains unchecked for the formal baseline sign-off; the administration console remains scheduled for M13.

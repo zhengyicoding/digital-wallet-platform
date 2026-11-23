@@ -15,3 +15,7 @@ jobs:
           java-version: '21'
           cache: maven
       - run: ./mvnw -B -q verify
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm --prefix web test
