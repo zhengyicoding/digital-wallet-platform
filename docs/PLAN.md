@@ -344,3 +344,12 @@ The initial root `./mvnw -q verify` ran 44 tests (13 auth and 31 wallet) with 42
 Cloned the candidate with `git clone --no-local`, confirmed clean tracked files and copied `.env.example` byte-for-byte to `.env`. Docker showed no existing containers, networks or volumes labeled `wallet-m14-check`. From the clone, ran `docker compose up --build` with `COMPOSE_PROJECT_NAME=wallet-m14-check` and `COMPOSE_FILE=docker-compose.yml:/private/tmp/wallet-m14-ports.yml`. The temporary override copied `web/test/compose-admin.yml` with 19083 changed to 19084 and 19303 changed to 19304 because both the default and M13 ports were occupied. nginx mapped to `127.0.0.1:19084:8080`, Grafana to `127.0.0.1:19304:3000`, and nginx advertised Grafana port 19304. PostgreSQL, Kafka, Prometheus and Tempo had their host bindings removed.
 
 B1 failed on the first attempt. Docker returned HTTP 500 while Compose inspected notification-service and left nginx in the created state. The 7.75 GiB Docker VM reported out-of-memory kills. Stopped the M14 containers and restored the four existing containers killed during verification (M12 Kafka, Tempo and wallet-service, and M13 Kafka). All four reported healthy again. B2, B3, B4, B5, B6 and B7 and both browser suites await a fresh startup. M14 remains unchecked.
+
+#### Follow-ups
+
+- **spring-web 6.2.1 raw `CancellationException` (not upgraded in M14).** On a read timeout,
+  `JdkClientHttpRequest` cancels its future and `CompletableFuture.get()` can rethrow the raw
+  `CancellationException` instead of an `HttpTimeoutException`. Before M14 this skipped the bank retry loop
+  (one attempt instead of four), which broke RES-4; it flaked `unknownPayoutRemainsReserved_RES1_RES2_RES4`.
+  `BankClient` now treats it as an UNKNOWN timeout and retries it, counted as TIMEOUT and recorded by the
+  circuit (RES-3). Revisit when Spring Boot/spring-web is upgraded; keep `BankClientTest` as the guard.

@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntConsumer;
 import javax.sql.DataSource;
@@ -63,6 +64,25 @@ class WalletCoreTest {
     static final ConcurrentMap<String, Integer> lookups = new ConcurrentHashMap<>();
     static final AtomicBoolean outage = new AtomicBoolean();
     static final CountDownLatch delayedReply = new CountDownLatch(1);
+    static final long CANCELLED_PAYOUT = 7373;
+    static final AtomicInteger cancelledAttempts = new AtomicInteger();
+
+    @org.springframework.boot.test.context.TestConfiguration
+    static class RawCancellation {
+        // Reproduces spring-web 6.2.1 surfacing a read timeout as a raw CancellationException (RES-4).
+        @org.springframework.context.annotation.Bean
+        org.springframework.boot.web.client.RestClientCustomizer cancelOnePayout() {
+            return builder -> builder.requestInterceptor((request, body, execution) -> {
+                if (request.getURI().getPath().equals("/bank/v1/transactions")
+                        && new ObjectMapper().readTree(body).path("amount").asLong() == CANCELLED_PAYOUT) {
+                    cancelledAttempts.incrementAndGet();
+                    throw new CancellationException();
+                }
+                return execution.execute(request, body);
+            });
+        }
+    }
+
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
     @Autowired JdbcClient db;
@@ -755,6 +775,20 @@ class WalletCoreTest {
         } finally {
             releaseSlowPayout.countDown();
         }
+    }
+
+    @Test void rawCancellationRetriedAndFundsStayReserved_RES3_RES4() throws Exception {
+        var owner = customer(10000);
+        var pending = create(owner, "withdrawals", CANCELLED_PAYOUT, "cancelled");
+        String id = pending.ok(202).required("id").asText();
+        // The fixture fails before any socket opens; the condition is a count, not a deadline.
+        await().atMost(10, TimeUnit.SECONDS).until(() -> cancelledAttempts.get() >= 4);
+        assertThat(cancelledAttempts).hasValue(4);
+        assertThat(call(get(pending.location), owner.token).ok(200).required("status").asText()).isEqualTo("PENDING");
+        assertThat(db.sql("select status from bank_operations where id=?").param(UUID.fromString(id))
+                .query(String.class).single()).isEqualTo("PENDING");
+        funds(owner, 10000 - CANCELLED_PAYOUT, CANCELLED_PAYOUT, CANCELLED_PAYOUT);
+        invariants();
     }
 
     String adminToken() throws Exception {

@@ -54,7 +54,7 @@ class BankClient {
             Gauge.builder("wallet.bank.circuit.state", circuit, c -> c.getState() == state ? 1 : 0)
                     .tag("state", state.name()).register(registry);
         }
-        for (String outcome : new String[]{"SUCCESS", "NOT_FOUND", "HTTP_ERROR", "SERVER_ERROR", "TIMEOUT", "CONNECTION_ERROR", "CIRCUIT_OPEN"}) {
+        for (String outcome : new String[]{"SUCCESS", "NOT_FOUND", "HTTP_ERROR", "SERVER_ERROR", "TIMEOUT", "CONNECTION_ERROR", "CIRCUIT_OPEN", "ERROR"}) {
             registry.counter("wallet.bank.calls", "outcome", outcome);
         }
     }
@@ -70,6 +70,10 @@ class BankClient {
 
     String circuitState() {
         return circuit.getState().name();
+    }
+
+    CircuitBreaker.Metrics circuitMetrics() {
+        return circuit.getMetrics();
     }
 
     private void dispatch(Submission submission, boolean lookup) {
@@ -90,14 +94,18 @@ class BankClient {
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
             } catch (Exception ex) {
-                log.warn("Bank call for {} ended with {}", submission.reference(), ex.getClass().getSimpleName());
+                // Never sets FAILED: the operation stays PENDING for reconciliation (RES-4). Counted for OPS-5.
+                registry.counter("wallet.bank.calls", "outcome", "ERROR").increment();
+                log.atWarn().addKeyValue("event", "wallet.bank.call").addKeyValue("operationId", submission.reference().toString())
+                        .addKeyValue("outcome", "ERROR").addKeyValue("error.type", ex.getClass().getSimpleName())
+                        .log("Bank call for {} ended with {}", submission.reference(), ex.getClass().getSimpleName());
             } finally {
                 if (lookup) reconciling.remove(submission.reference());
             }
         });
     }
 
-    private record Reply(int statusCode, byte[] body) {}
+    record Reply(int statusCode, byte[] body) {}
 
     private void apply(Submission submission, Reply response) throws IOException {
         if (response.statusCode() / 100 != 2) return;
@@ -107,7 +115,8 @@ class BankClient {
         }
     }
 
-    private Reply exchange(Submission submission, boolean lookup) throws Exception {
+    // Package-private for BankClientTest; every caller still goes through dispatch.
+    Reply exchange(Submission submission, boolean lookup) throws Exception {
         for (int attempt = 0; ; attempt++) {
             try {
                 return circuit.executeCallable(() -> {
@@ -129,10 +138,22 @@ class BankClient {
                         registry.counter("wallet.bank.calls", "outcome", cause instanceof java.net.http.HttpTimeoutException
                                 || cause instanceof java.net.SocketTimeoutException ? "TIMEOUT" : "CONNECTION_ERROR").increment();
                         throw new IOException("Bank unavailable");
+                    } catch (CancellationException cancelled) {
+                        // spring-web 6.2.1 can surface its read timeout as a raw cancellation. The outcome is
+                        // UNKNOWN (RES-4); rethrowing lets the circuit record it as a failure (RES-3).
+                        registry.counter("wallet.bank.calls", "outcome", "TIMEOUT").increment();
+                        throw cancelled;
                     }
                 });
-            } catch (IOException unavailable) {
-                if (attempt == 3) throw unavailable;
+            } catch (IOException | CancellationException unavailable) {
+                if (Thread.currentThread().isInterrupted() || workers.isShutdown()) {
+                    // Shutting down (OPS-8): stop retrying and leave the operation PENDING for reconciliation.
+                    Thread.currentThread().interrupt();
+                    throw new InterruptedException("Bank call abandoned during shutdown");
+                }
+                if (attempt == 3) {
+                    throw unavailable instanceof IOException io ? io : new IOException("Bank call timed out", unavailable);
+                }
                 long backoff = 100L << attempt;
                 Thread.sleep(backoff + ThreadLocalRandom.current().nextLong(backoff));
             }
