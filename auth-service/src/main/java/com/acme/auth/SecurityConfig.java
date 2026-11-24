@@ -20,7 +20,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 class SecurityConfig implements WebMvcConfigurer {
 
     @Bean
-    SecurityFilterChain securityFilterChain(HttpSecurity http, AuthProblems problems) throws Exception {
+    SecurityFilterChain securityFilterChain(HttpSecurity http, com.acme.auth.observability.RequestLogging newFilter, AuthProblems problems) throws Exception {
         var roles = new JwtGrantedAuthoritiesConverter();
         roles.setAuthoritiesClaimName("roles");
         roles.setAuthorityPrefix("ROLE_");
@@ -33,6 +33,7 @@ class SecurityConfig implements WebMvcConfigurer {
         };
 
         return http
+                .addFilterAfter(newFilter, org.springframework.security.web.authentication.AnonymousAuthenticationFilter.class)
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth

@@ -1,6 +1,11 @@
 package com.acme.bank;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.Span;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import jakarta.annotation.PreDestroy;
 import jakarta.validation.constraints.*;
 import org.springframework.beans.factory.annotation.Value;
@@ -40,13 +45,19 @@ public class BankEngine {
     private final ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(2);
     private final ExecutorService deliveries = Executors.newVirtualThreadPerTaskExecutor();
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
+    private final RestClient webhookClient;
+    private final Tracer tracer;
     private final ObjectMapper json;
     private final String secret;
     private final URI webhook;
     private Config config = new Config(null,null,null,null,null,null);
     private long generation;
     public BankEngine(ObjectMapper json, @Value("${bank.webhook-secret}") String secret,
-                      @Value("${bank.webhook-url}") URI webhook) {
+                      @Value("${bank.webhook-url}") URI webhook, RestClient.Builder builder, Tracer tracer) {
+        this.tracer = tracer;
+        var factory = new JdkClientHttpRequestFactory(client);
+        factory.setReadTimeout(Duration.ofSeconds(3));
+        this.webhookClient = builder.requestFactory(factory).build();
         this.json=json; this.secret=secret; this.webhook=webhook;
         scheduler.setRemoveOnCancelPolicy(true);
     }
@@ -73,16 +84,21 @@ public class BankEngine {
         var pending=new Transaction("bk-"+UUID.randomUUID(),input.reference(),input.type(),input.amount(),"PENDING",null);
         transactions.put(input.reference(),pending);
         long epoch=generation;
-        scheduler.schedule(() -> settle(pending,settings,epoch),settings.settleDelayMs(),TimeUnit.MILLISECONDS);
+        var parent = tracer.currentSpan();
+        scheduler.schedule(() -> settle(pending,settings,epoch,parent),settings.settleDelayMs(),TimeUnit.MILLISECONDS);
         return new Created(pending,true);
     }
-    private synchronized void settle(Transaction pending, Config settings, long epoch) {
+    private synchronized void settle(Transaction pending, Config settings, long epoch, Span parent) {
         if(epoch!=generation || transactions.get(pending.reference())!=pending) return;
         boolean declined=ThreadLocalRandom.current().nextDouble()<settings.declineRate();
         var settled=new Transaction(pending.bankTransactionId(),pending.reference(),pending.type(),pending.amount(),
                 declined?"FAILED":"SUCCEEDED",declined?"DECLINED":null);
         transactions.put(pending.reference(),settled);
-        deliveries.submit(() -> deliver(settled,settings.webhookCopies(),epoch));
+        deliveries.submit(() -> {
+            try (var ignored = tracer.withSpan(parent)) {
+                deliver(settled,settings.webhookCopies(),epoch);
+            }
+        });
     }
     private void deliver(Transaction transaction,int copies,long epoch) {
         try {
@@ -95,11 +111,11 @@ public class BankEngine {
                 mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8),"HmacSHA256"));
                 mac.update((timestamp+".").getBytes(StandardCharsets.UTF_8));
                 String signature=HexFormat.of().formatHex(mac.doFinal(body));
-                var request=HttpRequest.newBuilder(webhook).timeout(Duration.ofSeconds(3))
-                        .header("Content-Type","application/json").header("X-Bank-Timestamp",timestamp)
-                        .header("X-Bank-Signature",signature).POST(HttpRequest.BodyPublishers.ofByteArray(body)).build();
-                try { client.send(request,HttpResponse.BodyHandlers.discarding()); }
-                catch(java.io.IOException ignored) { /* BNK-4: no delivery retry. */ }
+                try {
+                    webhookClient.post().uri(webhook).contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                            .header("X-Bank-Timestamp",timestamp).header("X-Bank-Signature",signature).body(body)
+                            .exchange((request, response) -> response.getStatusCode().value());
+                } catch (ResourceAccessException ignored) { /* BNK-4: no delivery retry; SEC-7: never log signed requests. */ }
             }
         } catch(InterruptedException e) { Thread.currentThread().interrupt(); }
         catch(Exception e) { throw new IllegalStateException("Webhook encoding failed",e); }

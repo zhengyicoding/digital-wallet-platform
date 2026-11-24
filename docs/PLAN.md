@@ -65,7 +65,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 - [x] **M11 Hardening**: SEC-3 (admin role on admin endpoints), SEC-5 (server-side input validation), login rate
   limit SEC-9 (5/min per username, in-memory, configurable), AUTH-6 (login doesn't reveal username existence),
   graceful shutdown (OPS-8), ACC-2 #7 remainder (deposits, withdrawals, notifications cross-user checks).
-- [ ] **M12 Observability**: JSON logs with traceId/spanId/userId (OPS-4), Prometheus metrics per OPS-5
+- [x] **M12 Observability**: JSON logs with traceId/spanId/userId (OPS-4), Prometheus metrics per OPS-5
   (request rate, error rate, latency, operations by type/result, pending counts, outbox backlog, circuit state,
   notification counters), traceparent across bank webhook (OPS-6), provisioned Grafana dashboard (OPS-7),
   tracing backend container.
@@ -249,3 +249,43 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   The first notification test waited for HTTP shutdown logging while Kafka's earlier lifecycle phase was
   draining. Synchronizing on Docker's SIGTERM event fixed the fixture; the complete process test passed on rerun.
   M12 observability and M13 admin UI remain scheduled and unchecked.
+
+- 2026-11-24 — M12 complete (OPS-4 through OPS-7, SEC-7).
+  All four Spring services emit one ECS JSON event per line with `service.name`. Request events carry
+  `traceId`, `spanId` and the authenticated `userId` when available. Wallet transition events include
+  `operationId`, type and outcome after commit; rolled-back transitions, API replays and duplicate bank
+  settlements do not increment the operation counters or emit extra outcome events.
+  Prometheus has bounded route-template request counters and latency buckets for p95, wallet transition
+  counters, database-backed pending counts/oldest ages per kind, outbox backlog/oldest age, bank-call outcome
+  counters and one-hot circuit states. The pending/outbox aggregates are shared with the M10 status API;
+  notification-service retains the M7 NTF-5 counters. Health, metrics, JWKS, bank API and webhook endpoints
+  have no direct service host ports. The edge no longer publishes JWKS; the telemetry receiver stays internal.
+  Boot-configured HTTP clients instrument bank submission/reconciliation, asynchronous signed webhooks and
+  remote JWKS retrieval. Context is retained across the bank worker and settlement/delivery executors;
+  W3C traceparent and OTLP/HTTP export reach the existing Compose Tempo backend.
+  Repository provisioning loads the stable Prometheus/Tempo data sources and the 11-panel
+  `digital-wallet` Grafana dashboard automatically, including pending/outbox ages and NTF-5 counters.
+  Final root `./mvnw -q verify` passed 61 current tests: 13 auth, 31 wallet, 9 bank, 8 notification,
+  with zero failures, errors or skips. Surefire confirms all five new tests ran. Coverage includes route-template
+  histograms, notification metric export, trusted-identity/secret-safe request logging with MDC cleanup,
+  committed-only counters and JSON outcome logs, rollback/replay/duplicate settlement, persistent backlog
+  gauges, wallet bank-client propagation and asynchronous webhook traceparent propagation. An obsolete bank
+  skeleton report is excluded from the count. The first run exposed an incorrect test expectation (409 versus
+  the specified 422 rejection); the corrected test and full reactor passed. Verification also exposed dropped
+  outcome logs caused by duplicate `userId` JSON keys; using/restoring MDC and asserting real JSON events fixed it.
+  The repeatable isolated check is `infra/observability/smoke.py`, with
+  `infra/observability/compose-smoke.yml`, project `wallet-m12-check` and edge port 19082.
+  All Compose containers became healthy. A 10,000-cent deposit, 1,250-cent transfer and 2,000-cent withdrawal
+  settled; an insufficient-funds request returned 422, leaving 6,750 cents. A Prometheus scrape observed one
+  pending deposit and positive age before settlement; successful operation/bank/notification counters and the
+  rejected-route counter were present afterwards. All four scrape targets were UP, and all 11 dashboard panels
+  returned real series through Grafana's provisioned Prometheus proxy (including finite p95 values).
+  Tempo returned webhook trace `4302e725fc10e77b3f905e2bd39be967`: bank-simulator CLIENT span
+  `d1b75ade853c9e1b` is the direct parent of wallet-service SERVER span `867d867aab9de078`.
+  The smoke parsed 3,768 JSON events across all four services, confirmed request trace/span/user fields
+  and all three operation IDs/outcomes, and found none of the tested passwords, tokens, API keys or webhook secrets.
+  Service port bindings were empty. The initial isolated startup collided with M11's existing port 19081;
+  moving only M12 to 19082 resolved it. Rebuilding upstream services also required reloading the isolated nginx;
+  the repeatable check now performs that reload before traffic. One interrupted overnight smoke timed out;
+  the complete rebuilt-stack rerun passed. Existing M0/M11 containers and volumes were preserved.
+  M13 admin UI remains scheduled and unchecked. The M12 commit stays local for review.

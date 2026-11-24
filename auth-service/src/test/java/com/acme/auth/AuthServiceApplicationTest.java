@@ -35,6 +35,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+@org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability(tracing = true)
 @SpringBootTest(properties = {
         "auth.admin-username=admin_test",
         "auth.admin-password=test-admin-password"
@@ -273,4 +274,15 @@ class AuthServiceApplicationTest {
         return jdbc.sql("SELECT password_hash FROM users WHERE username = :username")
                 .param("username", username).query(String.class).single();
     }
+    @Test
+    @DisplayName("OPS-5: Prometheus exposes per-route latency histograms, including rejected logins")
+    void prometheusHistogram() throws Exception {
+        mockMvc.perform(post("/api/v1/auth/login").contentType("application/json")
+                .content("{\"username\":\"metric_unknown\",\"password\":\"metric-password\"}"))
+                .andExpect(status().isUnauthorized());
+        var metrics = mockMvc.perform(get("/actuator/prometheus")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(metrics).contains("http_server_requests_seconds_bucket", "uri=\"/api/v1/auth/login\"", "status=\"401\"");
+    }
+
 }

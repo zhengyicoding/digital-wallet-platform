@@ -14,6 +14,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import jakarta.annotation.PreDestroy;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.tracing.Tracer;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,21 +32,31 @@ class BankClient {
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
     private final CircuitBreaker circuit = CircuitBreaker.ofDefaults("bank");
     private final Set<UUID> reconciling = ConcurrentHashMap.newKeySet();
-    private final URI transactions;
-    private final String apiKey;
-    private final Duration timeout;
-    private final HttpClient client;
+    private final HttpClient transport;
+    private final RestClient client;
+    private final MeterRegistry registry;
+    private final Tracer tracer;
     private final ObjectMapper json;
     private final BankOperations operations;
 
     BankClient(@Value("${bank.base-url}") URI base, @Value("${bank.api-key}") String apiKey,
-               @Value("${bank.timeout}") Duration timeout, ObjectMapper json, BankOperations operations) {
-        this.transactions = base.resolve("/bank/v1/transactions");
-        this.apiKey = apiKey;
-        this.timeout = timeout;
+               @Value("${bank.timeout}") Duration timeout, ObjectMapper json, BankOperations operations,
+               RestClient.Builder builder, MeterRegistry registry, Tracer tracer) {
         this.json = json;
         this.operations = operations;
-        client = HttpClient.newBuilder().connectTimeout(timeout).build();
+        this.registry = registry;
+        this.tracer = tracer;
+        transport = HttpClient.newBuilder().connectTimeout(timeout).build();
+        var factory = new JdkClientHttpRequestFactory(transport);
+        factory.setReadTimeout(timeout);
+        client = builder.baseUrl(base.toString()).requestFactory(factory).defaultHeader("X-Api-Key", apiKey).build();
+        for (var state : CircuitBreaker.State.values()) {
+            Gauge.builder("wallet.bank.circuit.state", circuit, c -> c.getState() == state ? 1 : 0)
+                    .tag("state", state.name()).register(registry);
+        }
+        for (String outcome : new String[]{"SUCCESS", "NOT_FOUND", "HTTP_ERROR", "SERVER_ERROR", "TIMEOUT", "CONNECTION_ERROR", "CIRCUIT_OPEN"}) {
+            registry.counter("wallet.bank.calls", "outcome", outcome);
+        }
     }
 
     @TransactionalEventListener
@@ -57,20 +73,19 @@ class BankClient {
     }
 
     private void dispatch(Submission submission, boolean lookup) {
+        var parent = tracer.currentSpan();
         workers.execute(() -> {
-            try {
+            try (var ignored = tracer.withSpan(parent)) {
                 if (lookup) {
-                    var get = request(URI.create(transactions + "/" + submission.reference())).GET().build();
-                    var reply = exchange(get);
+                    var reply = exchange(submission, true);
                     if (reply.statusCode() != 404) {
                         apply(submission, reply);
                         return;
                     }
                 }
-                var post = request(transactions).header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofByteArray(json.writeValueAsBytes(submission))).build();
-                apply(submission, exchange(post));
+                apply(submission, exchange(submission, false));
             } catch (CallNotPermittedException open) {
+                registry.counter("wallet.bank.calls", "outcome", "CIRCUIT_OPEN").increment();
                 // The next reconciliation poll can retry after the circuit recovers.
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
@@ -82,11 +97,9 @@ class BankClient {
         });
     }
 
-    private HttpRequest.Builder request(URI uri) {
-        return HttpRequest.newBuilder(uri).header("X-Api-Key", apiKey).timeout(timeout);
-    }
+    private record Reply(int statusCode, byte[] body) {}
 
-    private void apply(Submission submission, HttpResponse<byte[]> response) throws IOException {
+    private void apply(Submission submission, Reply response) throws IOException {
         if (response.statusCode() / 100 != 2) return;
         var result = json.readValue(response.body(), BankResult.class);
         if (submission.reference().equals(result.reference()) && result.status() != BankOperations.Status.PENDING) {
@@ -94,13 +107,29 @@ class BankClient {
         }
     }
 
-    private HttpResponse<byte[]> exchange(HttpRequest request) throws Exception {
+    private Reply exchange(Submission submission, boolean lookup) throws Exception {
         for (int attempt = 0; ; attempt++) {
             try {
                 return circuit.executeCallable(() -> {
-                    var reply = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
-                    if (reply.statusCode() >= 500) throw new IOException("Bank unavailable");
-                    return reply;
+                    try {
+                        RestClient.RequestHeadersSpec<?> request = lookup
+                                ? client.get().uri("/bank/v1/transactions/{reference}", submission.reference())
+                                : client.post().uri("/bank/v1/transactions")
+                                    .contentType(org.springframework.http.MediaType.APPLICATION_JSON).body(submission);
+                        Reply reply = request.exchange((req, response) ->
+                                new Reply(response.getStatusCode().value(), response.getBody().readAllBytes()));
+                        String outcome = reply.statusCode >= 500 ? "SERVER_ERROR" : reply.statusCode == 404
+                                ? "NOT_FOUND" : reply.statusCode >= 400 ? "HTTP_ERROR" : "SUCCESS";
+                        registry.counter("wallet.bank.calls", "outcome", outcome).increment();
+                        if (reply.statusCode >= 500) throw new IOException("Bank unavailable");
+                        return reply;
+                    } catch (ResourceAccessException unavailable) {
+                        Throwable cause = unavailable;
+                        while (cause.getCause() != null) cause = cause.getCause();
+                        registry.counter("wallet.bank.calls", "outcome", cause instanceof java.net.http.HttpTimeoutException
+                                || cause instanceof java.net.SocketTimeoutException ? "TIMEOUT" : "CONNECTION_ERROR").increment();
+                        throw new IOException("Bank unavailable");
+                    }
                 });
             } catch (IOException unavailable) {
                 if (attempt == 3) throw unavailable;
@@ -112,6 +141,6 @@ class BankClient {
 
     @PreDestroy void close() {
         workers.shutdownNow();
-        client.close();
+        transport.close();
     }
 }

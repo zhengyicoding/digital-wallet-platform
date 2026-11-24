@@ -1,5 +1,6 @@
 package com.acme.wallet.bank;
 
+import com.acme.wallet.observability.OperationTelemetry.*;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -81,6 +82,7 @@ public class BankOperations {
                 outbox.append("withdrawal.requested", id, now.toInstant(),
                         new WithdrawalRequested(id, wallet, user, amount, "USD"));
             }
+            events.publishEvent(new Outcome(id, user, Type.valueOf(kind.name()), Result.PENDING));
             events.publishEvent(new Submission(id, kind.bankType, amount));
             return new Idempotency.Resource(id, new Operation(id, amount, "USD", Status.PENDING, null, now.toInstant(), null));
         });
@@ -130,6 +132,7 @@ public class BankOperations {
         } else if (succeeded) {
             post(result.reference, row.kind, systemAccount("EXTERNAL_BANK"), row.wallet, row.amount, "DEPOSIT");
         }
+        events.publishEvent(new Outcome(result.reference, user, Type.valueOf(row.kind.name()), Result.valueOf(result.status.name())));
         String reason = succeeded ? null : result.reason;
         Instant completedAt = db.sql("""
                 update bank_operations set status=?,failure_reason=?,completed_at=clock_timestamp() where id=?

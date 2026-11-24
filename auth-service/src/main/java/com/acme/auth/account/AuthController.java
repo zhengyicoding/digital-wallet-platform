@@ -32,6 +32,7 @@ class AuthController {
     @PostMapping("/api/v1/auth/login")
     AccessToken login(@RequestBody Credentials request) {
         var profile = accounts.authenticate(request.username(), request.password());
+        org.slf4j.MDC.put("userId", profile.id());
         return new AccessToken(tokens.issue(profile.id(), profile.username(), profile.displayName(), profile.roles()),
                 "Bearer", Tokens.LIFETIME_SECONDS);
     }

@@ -3,6 +3,8 @@ server:
   port: ${SERVER_PORT:8082}
 
 spring:
+  main:
+    banner-mode: off
   lifecycle:
     timeout-per-shutdown-phase: 40s
   task:
@@ -38,7 +40,28 @@ spring:
   flyway:
     enabled: true
 
+logging:
+  structured:
+    format:
+      console: ecs
+
 management:
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+    propagation:
+      type: w3c
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+  metrics:
+    tags:
+      service: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+      slo:
+        http.server.requests: 5ms,10ms,25ms,50ms,100ms,250ms,500ms,1s,2s,5s,10s,30s
   endpoints:
     web:
       exposure:

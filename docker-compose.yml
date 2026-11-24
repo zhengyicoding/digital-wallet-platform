@@ -52,6 +52,8 @@ services:
       context: .
       dockerfile: auth-service/Dockerfile
     environment:
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://tempo:4318/v1/traces}
+      TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
       AUTH_DB_URL: ${AUTH_DB_URL}
       AUTH_DB_USER: ${AUTH_DB_USER}
       AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD}
@@ -60,8 +62,6 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       JWT_ISSUER: ${JWT_ISSUER}
-    ports:
-      - "8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +78,8 @@ services:
       context: .
       dockerfile: wallet-service/Dockerfile
     environment:
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://tempo:4318/v1/traces}
+      TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
       WALLET_DB_URL: ${WALLET_DB_URL}
       WALLET_DB_USER: ${WALLET_DB_USER}
       WALLET_DB_PASSWORD: ${WALLET_DB_PASSWORD}
@@ -93,8 +95,6 @@ services:
       WALLET_MAX_AMOUNT: ${WALLET_MAX_AMOUNT:-200000}
       WALLET_DAILY_LIMIT: ${WALLET_DAILY_LIMIT:-500000}
       JWKS_URI: http://auth-service:8081/.well-known/jwks.json
-    ports:
-      - "8082:8082"
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,11 +115,11 @@ services:
       context: .
       dockerfile: bank-simulator/Dockerfile
     environment:
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://tempo:4318/v1/traces}
+      TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
       BANK_API_KEY: ${BANK_API_KEY}
       BANK_WEBHOOK_SECRET: ${BANK_WEBHOOK_SECRET}
       BANK_WEBHOOK_URL: http://wallet-service:8082/internal/webhooks/bank
-    ports:
-      - "8083:8083"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8083/actuator/health/readiness || exit 1"]
       interval: 10s
@@ -133,14 +133,14 @@ services:
       context: .
       dockerfile: notification-service/Dockerfile
     environment:
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://tempo:4318/v1/traces}
+      TRACING_SAMPLING_PROBABILITY: ${TRACING_SAMPLING_PROBABILITY:-1.0}
       NOTIFICATION_DB_URL: ${NOTIFICATION_DB_URL}
       NOTIFICATION_DB_USER: ${NOTIFICATION_DB_USER}
       NOTIFICATION_DB_PASSWORD: ${NOTIFICATION_DB_PASSWORD}
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
       JWT_ISSUER: ${JWT_ISSUER}
       JWKS_URI: http://auth-service:8081/.well-known/jwks.json
-    ports:
-      - "8084:8084"
     depends_on:
       postgres:
         condition: service_healthy
@@ -212,7 +212,6 @@ services:
     volumes:
       - ./infra/tempo/tempo.yml:/etc/tempo.yml
     ports:
-      - "4318:4318"
       - "3200:3200"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3200/ready"]

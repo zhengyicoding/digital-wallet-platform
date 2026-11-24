@@ -20,11 +20,13 @@ public class AdminController {
     record Page(List<Wallet> items, String nextCursor) {}
     private record Row(Wallet wallet, Cursor cursor) {}
 
+    private final StatusQueries statusQueries;
     private final Integrity integrity;
     private final Reconciliation reconciliation;
     private final JdbcClient db;
 
-    AdminController(Integrity integrity, Reconciliation reconciliation, JdbcClient db) {
+    AdminController(Integrity integrity, Reconciliation reconciliation, JdbcClient db, StatusQueries statusQueries) {
+        this.statusQueries = statusQueries;
         this.integrity = integrity;
         this.reconciliation = reconciliation;
         this.db = db;
@@ -37,18 +39,9 @@ public class AdminController {
 
     @GetMapping("/status")
     Status status() {
-        return db.sql("""
-                select p.*, o.*, cast(? as text) bank_circuit from (
-                    select count(*) filter (where kind='DEPOSIT') pending_deposits,
-                           count(*) filter (where kind='WITHDRAWAL') pending_withdrawals,
-                           greatest(0, floor(extract(epoch from now()-min(created_at)))) oldest_pending_seconds
-                    from bank_operations where status='PENDING'
-                ) p cross join (
-                    select count(*) outbox_unsent, greatest(0, floor(extract(epoch from
-                           now()-min((envelope->>'occurredAt')::timestamptz)))) outbox_oldest_seconds
-                    from outbox where sent_at is null
-                ) o
-                """).param(reconciliation.circuitState()).query(Status.class).single();
+        var snapshot = statusQueries.snapshot();
+        return new Status(snapshot.pendingDeposits(), snapshot.pendingWithdrawals(), snapshot.oldestPendingSeconds(),
+                snapshot.outboxUnsent(), snapshot.outboxOldestSeconds(), reconciliation.circuitState());
     }
 
     @GetMapping("/wallets")

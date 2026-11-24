@@ -1,6 +1,8 @@
 package com.acme.wallet.transfer;
 
 import java.sql.Timestamp;
+import com.acme.wallet.observability.OperationTelemetry.*;
+import org.springframework.context.ApplicationEventPublisher;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -22,8 +24,10 @@ public class Transfers {
     private final Wallets wallets;
     private final Idempotency idempotency;
     private final Outbox outbox;
+    private final ApplicationEventPublisher events;
 
-    public Transfers(JdbcClient db, Wallets wallets, Idempotency idempotency, Outbox outbox) {
+    public Transfers(JdbcClient db, Wallets wallets, Idempotency idempotency, Outbox outbox, ApplicationEventPublisher events) {
+        this.events = events;
         this.db = db;
         this.wallets = wallets;
         this.idempotency = idempotency;
@@ -75,6 +79,7 @@ public class Transfers {
         boolean senderFirst = locked.getFirst().walletId.equals(from);
         outbox.append("transfer.completed", id, now.toInstant(), new Completed(id, amount, "USD", request.note,
                 senderFirst ? locked.getFirst() : locked.getLast(), senderFirst ? locked.getLast() : locked.getFirst()));
+        events.publishEvent(new Outcome(id, userId, Type.TRANSFER, Result.COMPLETED));
         return new Transfer(id, from, to, amount, "USD", request.note, "COMPLETED", now.toInstant());
     }
 

@@ -19,10 +19,11 @@ import javax.crypto.spec.SecretKeySpec;
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
 
+@org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability(tracing = true)
 @SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT)
 class BankSimulatorTest {
     static final BlockingQueue<Delivery> received=new LinkedBlockingQueue<>();
-    record Delivery(byte[] body,String timestamp,String signature,long time) {}
+    record Delivery(byte[] body,String timestamp,String signature,long time,String traceparent) {}
     static final HttpServer receiver;
     static {
         try {
@@ -30,7 +31,7 @@ class BankSimulatorTest {
             receiver.createContext("/hook", exchange -> {
                 received.add(new Delivery(exchange.getRequestBody().readAllBytes(),
                         exchange.getRequestHeaders().getFirst("X-Bank-Timestamp"),
-                        exchange.getRequestHeaders().getFirst("X-Bank-Signature"),System.nanoTime()));
+                        exchange.getRequestHeaders().getFirst("X-Bank-Signature"),System.nanoTime(),exchange.getRequestHeaders().getFirst("traceparent")));
                 exchange.sendResponseHeaders(503,-1); exchange.close();
             });
             receiver.start();
@@ -157,4 +158,23 @@ class BankSimulatorTest {
         assertThat(call("GET","/docs/bank/",null,false).statusCode()).isEqualTo(302);
         assertThat(call("GET","/docs/bank/v3/api-docs",null,false).body()).contains("/bank/v1/transactions");
     }
+    @Test void ops5_ops6_asyncWebhookUsesInstrumentedClientAndW3cContext() throws Exception {
+        config("{\"settleDelayMs\":50,\"responseDelayMs\":0}");
+        String trace = "1234567890abcdef1234567890abcdef";
+        var request = HttpRequest.newBuilder(URI.create("http://localhost:"+port+"/bank/v1/transactions"))
+                .header("Content-Type", "application/json").header("X-Api-Key", "test-key")
+                .header("traceparent", "00-"+trace+"-1234567890abcdef-01")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"reference\":\"trace-check\",\"type\":\"CHARGE\",\"amount\":100}"))
+                .build();
+        assertThat(client.send(request, HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(202);
+        var delivery = received.poll(5, TimeUnit.SECONDS);
+        assertThat(delivery).isNotNull();
+        assertThat(delivery.traceparent()).matches("00-"+trace+"-[0-9a-f]{16}-01")
+                .doesNotContain("-1234567890abcdef-01");
+        call("GET", "/bank/v1/transactions/trace-check", null, true);
+        String metrics = call("GET", "/actuator/prometheus", null, false).body();
+        assertThat(metrics).contains("http_server_requests_seconds_bucket", "uri=\"/bank/v1/transactions/{reference}\"")
+                .doesNotContain("uri=\"/bank/v1/transactions/trace-check\"");
+    }
+
 }

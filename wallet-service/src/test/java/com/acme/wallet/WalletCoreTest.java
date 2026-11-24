@@ -43,6 +43,7 @@ import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 
 @org.springframework.test.context.ActiveProfiles("test")
+@org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability(tracing = true)
 @SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=32")
 @AutoConfigureMockMvc(print = org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint.NONE)
 @Testcontainers
@@ -52,6 +53,7 @@ class WalletCoreTest {
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
     static HttpServer jwks;
     static RSAKey key;
+    static final ConcurrentMap<String, String> bankTraceparents = new ConcurrentHashMap<>();
     static final ConcurrentMap<String, List<JsonNode>> bankCalls = new ConcurrentHashMap<>();
     static final CountDownLatch releaseSlowPayout = new CountDownLatch(1);
     static final ConcurrentMap<String, ObjectNode> bankRecords = new ConcurrentHashMap<>();
@@ -104,6 +106,7 @@ class WalletCoreTest {
                 var request = (ObjectNode) mapper.readTree(exchange.getRequestBody());
                 bankCalls.computeIfAbsent(request.path("reference").asText(), ignored -> new CopyOnWriteArrayList<>())
                         .add(request);
+                bankTraceparents.put(request.path("reference").asText(), Objects.toString(exchange.getRequestHeaders().getFirst("traceparent"), ""));
                 long amount = request.required("amount").asLong();
                 boolean outagePayout = amount >= 9101 && amount <= 9103;
                 if (outagePayout && outage.get()) {
@@ -900,4 +903,66 @@ class WalletCoreTest {
             invariants();
         }
     }
+    @Autowired io.micrometer.core.instrument.MeterRegistry meters;
+    @Autowired com.acme.wallet.bank.BankOperations bankOperations;
+    @Autowired com.acme.wallet.admin.StatusQueries statusQueries;
+
+    double operations(String type, String result) {
+        return meters.get("wallet.operations").tags("type", type, "result", result).counter().count();
+    }
+
+    @org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
+    @Test void ops4_ops5_committedTransitionsOnlyAndPersistentBacklogGauges(org.springframework.boot.test.system.CapturedOutput output) throws Exception {
+        var owner = customer(5000);
+        var other = customer(0);
+        double transfers = operations("TRANSFER", "COMPLETED");
+        String key = UUID.randomUUID().toString();
+        send(owner, other, 100, key).ok(201);
+        send(owner, other, 100, key).ok(201);
+        send(owner, other, 10000).code(422, "INSUFFICIENT_FUNDS");
+        assertThat(operations("TRANSFER", "COMPLETED")).isEqualTo(transfers + 1);
+        double pending = operations("DEPOSIT", "PENDING");
+        double settled = operations("DEPOSIT", "SUCCEEDED");
+        var operation = create(owner, "deposits", 37, UUID.randomUUID().toString());
+        operation.ok(202);
+        await().atMost(java.time.Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(bankTraceparents.get(operation.body.path("id").asText())).matches("00-[0-9a-f]{32}-[0-9a-f]{16}-01"));
+        assertThat(operations("DEPOSIT", "PENDING")).isEqualTo(pending + 1);
+        UUID id = UUID.fromString(operation.body.path("id").asText());
+        var result = new com.acme.wallet.bank.BankOperations.BankResult("bank-test", id, "CHARGE", 37,
+                com.acme.wallet.bank.BankOperations.Status.SUCCEEDED, null);
+        // OPS-4/5, RES-6: rollback cannot report success; duplicated settlement counts once.
+        tx.executeWithoutResult(status -> { bankOperations.applyResult(result); status.setRollbackOnly(); });
+        assertThat(operations("DEPOSIT", "SUCCEEDED")).isEqualTo(settled);
+        db.sql("update bank_operations set created_at=now()-interval '5 seconds' where id=?").param(id).update();
+        var snapshot = statusQueries.snapshot();
+        assertThat(meters.get("wallet.pending.operations").tag("type", "DEPOSIT").gauge().value())
+                .isEqualTo(snapshot.pendingDeposits());
+        assertThat(meters.get("wallet.pending.oldest.age.seconds").tag("type", "DEPOSIT").gauge().value()).isGreaterThanOrEqualTo(5);
+        bankOperations.applyResult(result);
+        bankOperations.applyResult(result);
+        assertThat(operations("DEPOSIT", "SUCCEEDED")).isEqualTo(settled + 1);
+        assertThat(meters.get("wallet.outbox.backlog").gauge().value()).isEqualTo(statusQueries.snapshot().outboxUnsent());
+        assertThat(meters.get("wallet.outbox.oldest.age.seconds").gauge().value()).isGreaterThanOrEqualTo(0);
+        assertThat(meters.get("wallet.bank.circuit.state").tag("state", "CLOSED").gauge().value()).isEqualTo(1);
+        var metrics = mvc.perform(get("/actuator/prometheus")).andReturn().getResponse().getContentAsString();
+        assertThat(metrics).contains("http_server_requests_seconds_bucket", "wallet_bank_calls_total", "wallet_operations_total")
+                .doesNotContain("operationId=", "userId=", "reference=");
+        var events = output.getOut().lines().filter(line -> line.startsWith("{"))
+                .map(line -> { try { return json.readTree(line); } catch (Exception ex) { throw new AssertionError(ex); } })
+                .filter(event -> event.path("event").asText().equals("wallet.operation")).toList();
+        assertThat(events).anySatisfy(event -> {
+            assertThat(event.path("type").asText()).isEqualTo("TRANSFER");
+            assertThat(event.path("outcome").asText()).isEqualTo("COMPLETED");
+            assertThat(event.path("traceId").asText()).hasSize(32);
+            assertThat(event.path("spanId").asText()).hasSize(16);
+            assertThat(event.path("userId").asText()).isNotBlank();
+        });
+        assertThat(events).anySatisfy(event -> {
+            assertThat(event.path("operationId").asText()).isEqualTo(id.toString());
+            assertThat(event.path("outcome").asText()).isEqualTo("PENDING");
+        });
+        invariants();
+    }
+
 }

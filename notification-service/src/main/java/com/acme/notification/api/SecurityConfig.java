@@ -22,7 +22,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 class SecurityConfig implements WebMvcConfigurer {
 
     @Bean
-    SecurityFilterChain securityFilterChain(HttpSecurity http, NotificationProblems problems) throws Exception {
+    SecurityFilterChain securityFilterChain(HttpSecurity http, com.acme.notification.observability.RequestLogging newFilter, NotificationProblems problems) throws Exception {
         var roles = new JwtGrantedAuthoritiesConverter();
         roles.setAuthoritiesClaimName("roles");
         roles.setAuthorityPrefix("ROLE_");
@@ -35,6 +35,7 @@ class SecurityConfig implements WebMvcConfigurer {
         };
 
         return http
+                .addFilterAfter(newFilter, org.springframework.security.web.authentication.AnonymousAuthenticationFilter.class)
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
@@ -49,8 +50,8 @@ class SecurityConfig implements WebMvcConfigurer {
     }
 
     @Bean
-    JwtDecoder jwtDecoder(@Value("${notification.jwks-uri}") String uri, @Value("${notification.issuer}") String issuer) {
-        var decoder = NimbusJwtDecoder.withJwkSetUri(uri).build();
+    JwtDecoder jwtDecoder(@Value("${notification.jwks-uri}") String uri, @Value("${notification.issuer}") String issuer, org.springframework.boot.web.client.RestTemplateBuilder http) {
+        var decoder = NimbusJwtDecoder.withJwkSetUri(uri).restOperations(http.build()).build();
         decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(JwtValidators.createDefaultWithIssuer(issuer),
                 jwt -> jwt.getExpiresAt() != null && jwt.getExpiresAt().isAfter(Instant.now())
                         && jwt.getSubject() != null && jwt.getSubject().matches("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")

@@ -32,6 +32,7 @@ import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+@org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability(tracing = true)
 @SpringBootTest
 @AutoConfigureMockMvc
 @Testcontainers
@@ -257,4 +258,14 @@ class NotificationServiceApplicationTest {
             db.sql("drop function notification_fail_once()").update();
         }
     }
+    @Test void ops5_ntf5_prometheusReusesNotificationCounters() throws Exception {
+        mvc.perform(get("/actuator/health/liveness")).andExpect(status().isOk());
+        var metrics = mvc.perform(get("/actuator/prometheus")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        for (String name : List.of("notification_events_processed_total", "notification_duplicates_ignored_total", "notification_dead_lettered_total")) {
+            assertThat(metrics).contains(name + "{service=\"notification-service\"} ");
+        }
+        assertThat(metrics).contains("http_server_requests_seconds_bucket");
+    }
+
 }
