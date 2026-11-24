@@ -308,3 +308,39 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   rendered its panels. Grafana redirected anonymous viewers away from Explore, so the tracing link uses
   a provisioned Tempo dashboard available to the existing Viewer role. Chrome followed a real trace ID
   from its table to the wallet-service span timeline. M14 remains open for final sign-off.
+
+### M14 final verification
+
+2026-11-24 — Verification in progress. Tested candidate `f2aa4cbac2cab6882b13b1d6d258e58a5397dd8d` is based on the M13 handoff `5828dac`. The candidate contains the root README and test-only changes. WalletCoreTest now runs the production outbox relay against Kafka and checks that the replayed transfer's single event received a broker acknowledgement. Status and gauge comparisons read one PostgreSQL snapshot while the relay publishes.
+
+#### ACC-2 evidence
+
+Methods below are JUnit tests. W denotes `WalletCoreTest`, O denotes `OutboxRelayTest` and N denotes `NotificationServiceApplicationTest`. The first two suites' Surefire XML recorded Testcontainers starting `postgres:16-alpine` and `apache/kafka:3.8.0`, a PostgreSQL JDBC connection and Kafka cluster metadata. W uses a controllable bank HTTP fixture for bank outcomes and callback timing.
+
+| ACC-2 | Outcome exercised | Test method | Current run |
+| --- | --- | --- | --- |
+| 1 | 32 workers, 2,000 opposing/random transfers, ten wallets, INV-1–6 | W.`acc2_1_opposingTransfers_CON1_CON3` | Pass |
+| 2 | Exactly ten of twenty debits succeed, ending balance zero | W.`acc2_2_preventOverdraft_CON2` | Pass |
+| 3 | Ten simultaneous identical requests, one transfer | W.`acc2_3_tenSimultaneousRequests_IDM2_IDM6` | Pass |
+| 4 | Changed amount with stored key returns 422 | W.`acc2_4_changedAmount_IDM5` | Pass |
+| 5 | Lost-response retry returns stored status, body and replay header | W.`acc2_5_retryAfterLostResponse_IDM2_IDM4` | Pass |
+| 6 | Sequential and concurrent payments respect the UTC daily limit | W.`acc2_6_dailyLimit_MNY3` | Pass |
+| 7 | Foreign transfer, deposit, withdrawal and notification return 404 | W.`acc2_7_transferOwnership_API4_WAL4_TRF3`, W.`hardeningBankAmountsAndOwnership_SEC5_ACC2_7`, N.`customerApiPaginationReadAndCrossUser_ACC2_7_NTF3_API5` | Wallet checks passed, notification pending |
+| 8 | Page through the original statement during new postings | W.`acc2_8_statementDuringWrites_API5` | Writer timed out |
+| 9 | Three signed success callbacks credit a deposit once | W.`acc2_9_tripleDeposit_DEP1_DEP3_RES6_IDM2` | Pass |
+| 10 | Wrong signature and 600-second-old signature return 401 | W.`acc2_10_authenticateBeforeSettlement_RES9_SEC4` | Pass |
+| 11 | Timeout holds payout funds until scheduled reconciliation succeeds | W.`acc2_11_timedOutPayoutRecoveredByPoll_RES4_RES7` | Pass |
+| 12 | Webhook and reconciliation contend for one row and apply one credit | W.`acc2_12_webhookRacesReconciliation_RES6_EVT1` | Pass |
+| 13 | Three withdrawals return 202 during an outage and settle after recovery | W.`acc2_13_outageThenResubmitUnknownReferences_RES3_RES7` | Pass |
+| 14 | Decline restores funds, posts a reversal and corrects sentToday | W.`acc2_14_withdrawSettleAndReverse_WDR1_WDR3_API4_API5` | Pass |
+| 15 | Eight transfers commit during a Kafka outage and all events reach the topic | O.`acc2_15_transfersDuringBrokerOutageDrainAutomatically_EVT1_EVT3` | Pass |
+| 16 | Duplicate delivery and replay create one notification per recipient | N.`acc2_16_duplicatesAcrossRestart_NTF2_EVT4` | Pending |
+| 17 | Malformed bytes reach the DLT and the next valid event is processed | N.`acc2_17_rawDltThenValidOnSamePartition_NTF4` | Pending |
+
+The initial root `./mvnw -q verify` ran 44 tests (13 auth and 31 wallet) with 42 passes, two timeout errors and zero skips. In addition to #8, `OutboxRelayTest.acknowledgedSendRetriesWithStableIdBeforeSettlementAcrossRelays_EVT2` timed out waiting for its funding event. Maven stopped before the bank and notification modules. In the clean clone, a separate `./mvnw -q -pl bank-simulator -am verify` passed all nine bank tests, and `npm --prefix web test` passed all nine frontend unit tests. Both had zero skips.
+
+#### Clean clone and ACC-1
+
+Cloned the candidate with `git clone --no-local`, confirmed clean tracked files and copied `.env.example` byte-for-byte to `.env`. Docker showed no existing containers, networks or volumes labeled `wallet-m14-check`. From the clone, ran `docker compose up --build` with `COMPOSE_PROJECT_NAME=wallet-m14-check` and `COMPOSE_FILE=docker-compose.yml:/private/tmp/wallet-m14-ports.yml`. The temporary override copied `web/test/compose-admin.yml` with 19083 changed to 19084 and 19303 changed to 19304 because both the default and M13 ports were occupied. nginx mapped to `127.0.0.1:19084:8080`, Grafana to `127.0.0.1:19304:3000`, and nginx advertised Grafana port 19304. PostgreSQL, Kafka, Prometheus and Tempo had their host bindings removed.
+
+B1 failed on the first attempt. Docker returned HTTP 500 while Compose inspected notification-service and left nginx in the created state. The 7.75 GiB Docker VM reported out-of-memory kills. Stopped the M14 containers and restored the four existing containers killed during verification (M12 Kafka, Tempo and wallet-service, and M13 Kafka). All four reported healthy again. B2, B3, B4, B5, B6 and B7 and both browser suites await a fresh startup. M14 remains unchecked.

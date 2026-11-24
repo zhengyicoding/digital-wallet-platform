@@ -37,6 +37,7 @@ import org.springframework.test.annotation.DirtiesContext;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.KafkaContainer;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
@@ -44,13 +45,15 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 
 @org.springframework.test.context.ActiveProfiles("test")
 @org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability(tracing = true)
-@SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=32")
+@SpringBootTest(properties = {"spring.datasource.hikari.maximum-pool-size=32", "wallet.outbox.enabled=true"})
 @AutoConfigureMockMvc(print = org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint.NONE)
 @Testcontainers
 @DirtiesContext
 class WalletCoreTest {
     @Container @ServiceConnection
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    @Container
+    static final KafkaContainer broker = new KafkaContainer("apache/kafka:3.8.0");
     static HttpServer jwks;
     static RSAKey key;
     static final ConcurrentMap<String, String> bankTraceparents = new ConcurrentHashMap<>();
@@ -69,6 +72,7 @@ class WalletCoreTest {
 
     @DynamicPropertySource
     static void keys(DynamicPropertyRegistry registry) throws Exception {
+        registry.add("spring.kafka.bootstrap-servers", broker::getBootstrapServers);
         key = new RSAKeyGenerator(2048).keyID("test").generate();
         jwks = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         jwks.createContext("/.well-known/jwks.json", exchange -> {
@@ -336,6 +340,11 @@ class WalletCoreTest {
         assertThat(retry.location).isEqualTo(original.location);
         assertThat(retry.replayed).isEqualTo("true");
         assertSingleTransfer(from, to, 9);
+        // ACC-2 #5 / EVT-1: the relay marked the one committed event sent after Kafka acknowledged it.
+        var transferId = UUID.fromString(original.body.required("id").asText());
+        await().atMost(30, TimeUnit.SECONDS).until(() ->
+                db.sql("select count(*) from outbox where aggregate_id=? and sent_at is not null")
+                        .param(transferId).query(Integer.class).single() == 1);
         var events = payloads(original, "transfer.completed");
         assertThat(events).containsExactly(json.readTree("""
                 {"transferId":"%s","amount":9,"currency":"USD","note":"Lunch",
@@ -840,6 +849,14 @@ class WalletCoreTest {
         invariants();
     }
 
+    // Read both sides of a backlog assertion at the same instant while the relay keeps publishing.
+    void inReadSnapshot(Runnable assertions) {
+        tx.executeWithoutResult(status -> {
+            db.sql("set transaction isolation level repeatable read").update();
+            assertions.run();
+        });
+    }
+
     @Test void administration_ADM1_ADM2_ADM3_ADM4_API5_SEC3() throws Exception {
         var first = customer(0);
         var owner = customer(100);
@@ -856,22 +873,24 @@ class WalletCoreTest {
         assertThat(report.required("checks")).hasSize(6);
         assertThat(report.required("totals").required("payoutHold").asLong()).isEqualTo(
                 scalar("select balance from accounts where system_name='PAYOUT_HOLD'"));
-        var status = call(get("/api/v1/admin/status"), admin).ok(200);
-        assertThat(status.required("pendingWithdrawals").asLong()).isEqualTo(
-                scalar("select count(*) from bank_operations where status='PENDING' and kind='WITHDRAWAL'"));
-        assertThat(status.required("outboxUnsent").asLong()).isEqualTo(scalar("select count(*) from outbox where sent_at is null"));
-        assertThat(status.required("pendingDeposits").asLong()).isEqualTo(
-                scalar("select count(*) from bank_operations where status='PENDING' and kind='DEPOSIT'"));
-        long pendingAge = scalar("""
-                select greatest(0, floor(extract(epoch from now()-min(created_at)))) from bank_operations where status='PENDING'
-                """);
-        long unsentAge = scalar("""
-                select greatest(0, floor(extract(epoch from now()-min((envelope->>'occurredAt')::timestamptz))))
-                from outbox where sent_at is null
-                """);
-        assertThat(status.required("oldestPendingSeconds").asLong()).isBetween(Math.max(0, pendingAge - 1), pendingAge);
-        assertThat(status.required("outboxOldestSeconds").asLong()).isBetween(Math.max(0, unsentAge - 1), unsentAge);
-        assertThat(status.required("bankCircuit").asText()).isEqualTo("CLOSED");
+        inReadSnapshot(() -> {
+            var status = call(get("/api/v1/admin/status"), admin).ok(200);
+            assertThat(status.required("pendingWithdrawals").asLong()).isEqualTo(
+                    scalar("select count(*) from bank_operations where status='PENDING' and kind='WITHDRAWAL'"));
+            assertThat(status.required("outboxUnsent").asLong()).isEqualTo(scalar("select count(*) from outbox where sent_at is null"));
+            assertThat(status.required("pendingDeposits").asLong()).isEqualTo(
+                    scalar("select count(*) from bank_operations where status='PENDING' and kind='DEPOSIT'"));
+            long pendingAge = scalar("""
+                    select greatest(0, floor(extract(epoch from now()-min(created_at)))) from bank_operations where status='PENDING'
+                    """);
+            long unsentAge = scalar("""
+                    select greatest(0, floor(extract(epoch from now()-min((envelope->>'occurredAt')::timestamptz))))
+                    from outbox where sent_at is null
+                    """);
+            assertThat(status.required("oldestPendingSeconds").asLong()).isBetween(Math.max(0, pendingAge - 1), pendingAge);
+            assertThat(status.required("outboxOldestSeconds").asLong()).isBetween(Math.max(0, unsentAge - 1), unsentAge);
+            assertThat(status.required("bankCircuit").asText()).isEqualTo("CLOSED");
+        });
         var page = call(get("/api/v1/admin/wallets?limit=1"), admin).ok(200);
         var row = page.required("items").get(0);
         assertThat(row.required("walletId").asText()).isEqualTo(owner.wallet.toString());
@@ -942,7 +961,8 @@ class WalletCoreTest {
         bankOperations.applyResult(result);
         bankOperations.applyResult(result);
         assertThat(operations("DEPOSIT", "SUCCEEDED")).isEqualTo(settled + 1);
-        assertThat(meters.get("wallet.outbox.backlog").gauge().value()).isEqualTo(statusQueries.snapshot().outboxUnsent());
+        inReadSnapshot(() -> assertThat(meters.get("wallet.outbox.backlog").gauge().value())
+                .isEqualTo(statusQueries.snapshot().outboxUnsent()));
         assertThat(meters.get("wallet.outbox.oldest.age.seconds").gauge().value()).isGreaterThanOrEqualTo(0);
         assertThat(meters.get("wallet.bank.circuit.state").tag("state", "CLOSED").gauge().value()).isEqualTo(1);
         var metrics = mvc.perform(get("/actuator/prometheus")).andReturn().getResponse().getContentAsString();
