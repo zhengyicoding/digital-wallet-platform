@@ -1,9 +1,13 @@
 import { cents, money, newAction, retryable, Client, Poller } from './core.mjs';
+import { isAdmin } from './admin-core.mjs';
+import { AdminConsole } from './admin.mjs';
 
 const app = document.querySelector('#app');
 const $ = (selector, root = document) => root.querySelector(selector);
 const tokenKey = 'wallet.accessToken';
 const actionKey = 'wallet.moneyAction';
+const lastActionKey = 'wallet.lastMoneyAction';
+let adminConsole, lastMoneyAction;
 const labels = { transfers: 'Send money', deposits: 'Add money', withdrawals: 'Withdraw' };
 let profile, wallet, view = 'home', recipient, draft, payment, sending = false, pageEpoch = 0;
 const pending = new Map();
@@ -47,10 +51,12 @@ function resetLists() {
 resetLists();
 
 function logout(message = '') {
+  adminConsole?.stop(); adminConsole = null; lastMoneyAction = null;
   poller.stop();
   client.reset();
   sessionStorage.removeItem(tokenKey);
   sessionStorage.removeItem(actionKey);
+  sessionStorage.removeItem(lastActionKey);
   profile = wallet = recipient = draft = payment = null;
   sending = false;
   entryType = ''; unreadOnly = false;
@@ -113,6 +119,10 @@ async function startSession(token) {
   app.innerHTML = '<p role="status">Loading your wallet…</p>';
   try {
     profile = await client.request('/api/v1/auth/me');
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(lastActionKey));
+      lastMoneyAction = saved?.owner === profile.id ? saved.action : null;
+    } catch { lastMoneyAction = null; }
     try { payment = JSON.parse(sessionStorage.getItem(actionKey)); } catch { payment = null; }
     if (payment?.result && payment.action.kind !== 'transfers') track(payment.action.kind, payment.result);
     shell();
@@ -136,15 +146,22 @@ function shell() {
     if (key === 'notifications') item.append(' ', node('span', '0', 'badge'));
     nav.append(item);
   }
+  if (isAdmin(profile)) {
+    const item = button('Admin console', () => navigate('admin'));
+    item.dataset.view = 'admin'; nav.append(item);
+  }
   nav.append(button('Log out', () => logout(), 'logout'));
-  navigate('home');
+  navigate(location.hash === '#admin' || location.pathname === '/admin' ? 'admin' : 'home');
 }
 
 function navigate(next) {
   if (!profile) return;
+  const denied = next === 'admin' && !isAdmin(profile);
+  if (denied || !['home', 'admin', 'activity', 'notifications', ...Object.keys(labels)].includes(next)) next = 'home';
+  adminConsole?.stop(); adminConsole = null;
   view = next;
   pageEpoch++;
-  history.replaceState(null, '', `#${view}`);
+  history.replaceState(null, '', `/#${view}`);
   for (const item of document.querySelectorAll('nav [data-view]')) {
     if (item.dataset.view === view) item.setAttribute('aria-current', 'page');
     else item.removeAttribute('aria-current');
@@ -154,7 +171,10 @@ function navigate(next) {
   if (view === 'home') renderHome();
   else if (view === 'activity') showActivity();
   else if (view === 'notifications') showNotifications();
+  else if (view === 'admin') adminConsole = new AdminConsole(content, client.token,
+    () => logout('Your session has expired. Please log in again.'), () => lastMoneyAction);
   else showMoney();
+  if (denied) content.prepend(node('p', 'Administrator access is required. (FORBIDDEN)', 'error'));
   renderResume();
 }
 
@@ -338,6 +358,8 @@ async function submitPayment() {
   payment.error = null;
   renderPayment();
   const current = payment;
+  lastMoneyAction = current.action;
+  sessionStorage.setItem(lastActionKey, JSON.stringify({ owner: profile.id, action: lastMoneyAction }));
   try {
     const result = await client.send(current.action);
     if (payment !== current) return;
@@ -497,6 +519,7 @@ function renderList(kind) {
 }
 
 document.querySelector('.brand').onclick = event => { event.preventDefault(); if (profile) navigate('home'); };
+window.addEventListener('hashchange', () => { if (profile) navigate(location.hash.slice(1)); });
 const token = sessionStorage.getItem(tokenKey);
 if (token) startSession(token);
 else showAuth();

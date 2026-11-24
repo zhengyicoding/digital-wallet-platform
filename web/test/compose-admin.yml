@@ -1,0 +1,16 @@
+# UI-3 isolated browser stack. No existing project containers or volumes are reused.
+services:
+  postgres:
+    ports: !reset []
+  kafka:
+    ports: !reset []
+  web:
+    ports: !override ["127.0.0.1:19083:8080"]
+    environment:
+      GRAFANA_PORT: 19303
+  prometheus:
+    ports: !reset []
+  grafana:
+    ports: !override ["127.0.0.1:19303:3000"]
+  tempo:
+    ports: !reset []

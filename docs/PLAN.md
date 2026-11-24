@@ -69,7 +69,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   (request rate, error rate, latency, operations by type/result, pending counts, outbox backlog, circuit state,
   notification counters), traceparent across bank webhook (OPS-6), provisioned Grafana dashboard (OPS-7),
   tracing backend container.
-- [ ] **M13 Admin console UI**: integrity check, status with 2s refresh, wallets with 2s refresh, bank failure
+- [x] **M13 Admin console UI**: integrity check, status with 2s refresh, wallets with 2s refresh, bank failure
   presets (Normal/Slow/Down/Hang/Decline/Duplicate webhooks/No webhooks), diagnostics (repeat last key, 10x
   parallel same key), links to Swagger UIs + Grafana + tracing (UI-3).
 - [ ] **M14 Final verification**: full ACC-2 suite green; clean-clone `docker compose up --build` test (OPS-1);
@@ -289,3 +289,22 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   the repeatable check now performs that reload before traffic. One interrupted overnight smoke timed out;
   the complete rebuilt-stack rerun passed. Existing M0/M11 containers and volumes were preserved.
   M13 admin UI remains scheduled and unchecked. The M12 commit stays local for review.
+
+- 2026-11-24 — M13 complete (UI-3, ADM-1..4, API-5/8, BNK-6, IDM-2, SEC-3).
+  Root `./mvnw -q verify` passed 61 current tests (13 auth, 31 wallet, 9 bank, 8 notification).
+  All nine frontend unit tests passed, including cursor refresh after a page failure and parallel replay with
+  mixed HTTP outcomes. Both suites had zero failures or skips. The existing customer Chrome suite passed
+  all 15 reported scenarios. The M13 Chrome suite ran against ten healthy containers in the separate
+  `wallet-m13-check` Compose project on edge port 19083 and Grafana port 19303.
+  A customer opening the console directly returned home and all four protected wallet admin APIs returned
+  403. An admin saw PASS and the detail for INV-1..6, all six status fields, and a 202 job-accepted message.
+  With a custom 6.5-second settlement delay, polling showed the pending deposit and then the customer's
+  $1.23 balance beyond the first 20 wallets. Polling stopped on leaving the console and on logout.
+  All seven presets matched the simulator's settings on readback and Normal restored all six defaults.
+  After a successful $2.57 deposit, New payment and a page reload, the single replay and ten parallel
+  replays used the original endpoint, serialized body and key. All eleven returned 202 with the replay
+  header. Wallet balance, statement and deposit list were identical before and after each action.
+  A fresh sign-in had no saved request. All four Swagger pages rendered operations and the M12 dashboard
+  rendered its panels. Grafana redirected anonymous viewers away from Explore, so the tracing link uses
+  a provisioned Tempo dashboard available to the existing Viewer role. Chrome followed a real trace ID
+  from its table to the wallet-service span timeline. M14 remains open for final sign-off.

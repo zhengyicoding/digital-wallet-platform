@@ -1,8 +1,8 @@
-# Customer web application (M8)
+# Digital Wallet web application
 
 The buildless SPA in `public/` runs at `http://localhost:8080/` in the existing nginx container.
-All requests use the same origin and the existing `/api/v1/**` routes. No frontend secrets or
-external CDN dependencies are needed. The administration console belongs to M13.
+API requests use the same origin through nginx. No frontend secrets or
+external CDN dependencies are needed.
 
 `core.mjs` contains exact decimal-to-cents conversion, the session-scoped API client, immutable
 money requests and the single-flight refresh scheduler. `app.mjs` renders customer screens.
@@ -47,3 +47,22 @@ notification actions, exact cents, lost-response and REQUEST_IN_PROGRESS retries
 reload persistence, mobile layout, OpenAPI routes, failed login and logout. Two controlled
 browser response fixtures cover a markup display name and an authenticated 401; they are reported
 separately from real backend behavior.
+
+Administrators can open **Admin console** from the navigation or visit `/#admin` directly.
+The console reads roles from the authenticated profile. Wallet administration uses the protected
+M10 APIs. Bank controls use the simulator's separate `/bank/admin/config` route (Section 6.6).
+The Grafana dashboard and Tempo trace viewer links use the current host and the published
+`GRAFANA_PORT` (default 3000).
+
+Run the UI-3 browser check against its own Compose project. It creates wallets and real deposits,
+exercises all presets and restores the previous simulator settings on exit. Set
+`PLAYWRIGHT_CORE_PATH` and optionally `CHROME_PATH` as above.
+
+```sh
+docker compose --env-file .env.example -p wallet-m13-check -f docker-compose.yml -f web/test/compose-admin.yml up --build --wait
+node --env-file=.env.example web/test/admin-browser.cjs
+```
+
+The isolated edge listens on port 19083 and Grafana on 19303. The browser compares the admin's
+wallet, statement and deposit list before and after each replay. A fresh sign-in clears the
+saved request. An unsuccessful original request can be evaluated again under IDM-3.

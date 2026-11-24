@@ -70,7 +70,7 @@ export class Client {
     this.controllers.clear();
     this.token = token;
   }
-  async request(path, { method = 'GET', body, key, authenticated = true } = {}) {
+  async request(path, { method = 'GET', body, key, authenticated = true, withStatus = false } = {}) {
     const generation = this.generation;
     const controller = new AbortController();
     this.controllers.add(controller);
@@ -89,7 +89,7 @@ export class Client {
       const data = response.status === 204 ? null : await response.json().catch(() => ({}));
       if (generation !== this.generation) throw new DOMException('Session changed', 'AbortError');
       if (!response.ok) throw new ApiError(response.status, data);
-      return data;
+      return withStatus ? { status: response.status, data } : data;
     } catch (error) {
       if (generation !== this.generation) throw new DOMException('Session changed', 'AbortError');
       if (error instanceof ApiError) throw error;

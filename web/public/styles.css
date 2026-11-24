@@ -38,6 +38,14 @@ form button[type="submit"] { margin-top: 24px; }
 .error { color: #8a2d22; background: #fff1ec; border: 1px solid #f0c9bc; padding: 13px 16px; border-radius: 10px; margin: 14px 0; overflow-wrap: anywhere; }
 .notice { background: #e7f0de; padding: 13px 16px; border-radius: 10px; margin-bottom: 18px; }
 [hidden] { display: none !important; }
+#admin-error:empty { display: none; }
+#admin-tools { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+#admin-tools h2 { flex-basis: 100%; }
+#admin-tools a { color: #183e36; }
+#bank-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; align-items: center; }
+#bank-settings input[type="checkbox"] { width: 24px; height: 24px; }
+#status-values { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+#integrity-results pre { overflow-x: auto; }
 .status { display: inline-block; font-size: 12px; font-weight: 750; background: #edf1e9; border-radius: 30px; padding: 6px 11px; }
 .status[data-status="PENDING"] { background: #fff0ca; color: #775513; }
 .status[data-status="SUCCEEDED"], .status[data-status="COMPLETED"] { background: #e0efda; color: #255c32; }
