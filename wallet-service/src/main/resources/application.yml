@@ -2,6 +2,10 @@ server:
   port: ${SERVER_PORT:8082}
 
 spring:
+  task:
+    scheduling:
+      pool:
+        size: 2
   application:
     name: wallet-service
   jackson:
@@ -52,6 +56,9 @@ springdoc:
     path: /docs/wallet/v3/api-docs
 
 wallet:
+  reconciliation:
+    pending-age: ${RECONCILIATION_PENDING_AGE:30s}
+    interval: ${RECONCILIATION_INTERVAL:10s}
   issuer: ${JWT_ISSUER:digital-wallet-auth}
   jwks-uri: ${JWKS_URI:http://localhost:8081/.well-known/jwks.json}
   min-amount: ${WALLET_MIN_AMOUNT:1}

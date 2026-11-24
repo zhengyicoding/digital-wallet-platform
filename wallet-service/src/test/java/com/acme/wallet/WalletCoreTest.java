@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntConsumer;
 import javax.sql.DataSource;
@@ -13,6 +14,7 @@ import com.acme.wallet.idempotency.Idempotency;
 import com.acme.wallet.ledger.Wallets;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.nimbusds.jose.*;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.*;
@@ -31,17 +33,20 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 
 @org.springframework.test.context.ActiveProfiles("test")
 @SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=32")
 @AutoConfigureMockMvc(print = org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint.NONE)
 @Testcontainers
+@DirtiesContext
 class WalletCoreTest {
     @Container @ServiceConnection
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
@@ -49,7 +54,10 @@ class WalletCoreTest {
     static RSAKey key;
     static final ConcurrentMap<String, List<JsonNode>> bankCalls = new ConcurrentHashMap<>();
     static final CountDownLatch releaseSlowPayout = new CountDownLatch(1);
-    static final AtomicLong seededDeposits = new AtomicLong();
+    static final ConcurrentMap<String, ObjectNode> bankRecords = new ConcurrentHashMap<>();
+    static final ConcurrentMap<String, Integer> lookups = new ConcurrentHashMap<>();
+    static final AtomicBoolean outage = new AtomicBoolean();
+    static final CountDownLatch delayedReply = new CountDownLatch(1);
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
     @Autowired JdbcClient db;
@@ -71,23 +79,49 @@ class WalletCoreTest {
         jwks.createContext("/bank/v1/transactions", exchange -> {
             try (exchange) {
                 var mapper = new ObjectMapper();
-                var request = mapper.readTree(exchange.getRequestBody());
                 if (!"test-api-key".equals(exchange.getRequestHeaders().getFirst("X-Api-Key"))) {
                     exchange.sendResponseHeaders(401, -1);
                     return;
                 }
+                if (exchange.getRequestMethod().equals("GET")) {
+                    String path = exchange.getRequestURI().getPath();
+                    String reference = path.substring(path.lastIndexOf('/') + 1);
+                    lookups.merge(reference, 1, Integer::sum);
+                    if (outage.get()) {
+                        exchange.sendResponseHeaders(503, -1);
+                        return;
+                    }
+                    var result = bankRecords.get(reference);
+                    if (result == null) {
+                        exchange.sendResponseHeaders(404, -1);
+                    } else {
+                        byte[] reply = mapper.writeValueAsBytes(result);
+                        exchange.sendResponseHeaders(200, reply.length);
+                        exchange.getResponseBody().write(reply);
+                    }
+                    return;
+                }
+                var request = (ObjectNode) mapper.readTree(exchange.getRequestBody());
                 bankCalls.computeIfAbsent(request.path("reference").asText(), ignored -> new CopyOnWriteArrayList<>())
                         .add(request);
-                if (request.path("amount").asLong() == 71) {
+                long amount = request.required("amount").asLong();
+                boolean outagePayout = amount >= 9101 && amount <= 9103;
+                if (outagePayout && outage.get()) {
+                    exchange.sendResponseHeaders(503, -1);
+                    return;
+                }
+                var record = bankRecords.computeIfAbsent(request.required("reference").asText(),
+                        ref -> request.deepCopy().put("status", outagePayout ? "SUCCEEDED" : "PENDING"));
+                if (amount == 9111 || amount == 71) {
+                    var release = amount == 9111 ? delayedReply : releaseSlowPayout;
                     try {
-                        releaseSlowPayout.await(10, TimeUnit.SECONDS);
+                        release.await(10, TimeUnit.SECONDS);
                     } catch (InterruptedException ex) {
                         Thread.currentThread().interrupt();
                     }
                     exchange.sendResponseHeaders(503, -1);
                 } else {
-                    var pending = ((com.fasterxml.jackson.databind.node.ObjectNode) request.deepCopy()).put("status", "PENDING");
-                    byte[] reply = mapper.writeValueAsBytes(pending);
+                    byte[] reply = mapper.writeValueAsBytes(record);
                     exchange.sendResponseHeaders(201, reply.length);
                     exchange.getResponseBody().write(reply);
                 }
@@ -96,6 +130,8 @@ class WalletCoreTest {
         jwks.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         jwks.start();
         registry.add("bank.base-url", () -> "http://127.0.0.1:" + jwks.getAddress().getPort());
+        registry.add("wallet.reconciliation.interval", () -> "250ms");
+        registry.add("wallet.reconciliation.pending-age", () -> "60s");
         registry.add("bank.timeout", () -> "500ms");
         registry.add("wallet.jwks-uri", () -> "http://127.0.0.1:" + jwks.getAddress().getPort() + "/.well-known/jwks.json");
     }
@@ -148,9 +184,13 @@ class WalletCoreTest {
         String token = userToken(name);
         var wallet = UUID.fromString(call(post("/api/v1/wallets"),token).ok(201).path("id").asText());
         if (funding > 0) {
-            // Balanced fixture standing in for M5's succeeded deposit.
+            // A settled funding fixture contributes to both the ledger and INV-5.
             UUID id = Wallets.newId();
             tx.executeWithoutResult(status -> {
+                db.sql("""
+                        insert into bank_operations(id,wallet_id,kind,amount,status,created_at,completed_at)
+                        values (?,?,'DEPOSIT',?,'SUCCEEDED',now(),now())
+                        """).params(id,wallet,funding).update();
                 db.sql("insert into postings values (?,'DEPOSIT',?)").params(id,id).update();
                 db.sql("""
                         insert into ledger_entries(id,posting_id,account_id,type,amount) values
@@ -158,7 +198,6 @@ class WalletCoreTest {
                         (?,?,?,'DEPOSIT',?)
                         """).params(Wallets.newId(),id,-funding,Wallets.newId(),id,wallet,funding).update();
             });
-            seededDeposits.addAndGet(funding);
         }
         return new Customer(name,token,wallet);
     }
@@ -194,7 +233,7 @@ class WalletCoreTest {
     long scalar(String sql) { return db.sql(sql).query(Long.class).single(); }
 
     void invariants() {
-        WalletInvariantAssertions.verify(db, seededDeposits.get());
+        WalletInvariantAssertions.verify(db, 0);
     }
 
     @Test void acc2_1_opposingTransfers_CON1_CON3() throws Exception {
@@ -632,7 +671,7 @@ class WalletCoreTest {
         invariants();
     }
 
-    @Test void withdrawSettleAndReverse_WDR1_WDR3_API4_API5() throws Exception {
+    @Test void acc2_14_withdrawSettleAndReverse_WDR1_WDR3_API4_API5() throws Exception {
         var owner = customer(1000);
         var success = create(owner, "withdrawals", 200, "first");
         success.ok(202);
@@ -640,7 +679,12 @@ class WalletCoreTest {
         webhook(success, "PAYOUT", "SUCCEEDED", 0, "test-webhook-secret").ok(200);
         funds(owner, 800, 0, 200);
         var declined = create(owner, "withdrawals", 300, "second");
-        webhook(declined, "PAYOUT", "FAILED", 0, "test-webhook-secret").ok(200);
+        String reference = declined.ok(202).required("id").asText();
+        await().atMost(5, TimeUnit.SECONDS).until(() -> bankRecords.containsKey(reference));
+        bankRecords.computeIfPresent(reference, (ref, row) -> row.deepCopy().put("status", "FAILED").put("reason", "DECLINED"));
+        call(post("/api/v1/admin/reconciliation"), adminToken()).ok(202);
+        await().atMost(5, TimeUnit.SECONDS).until(() ->
+                call(get(declined.location), owner.token).ok(200).required("status").asText().equals("FAILED"));
         funds(owner, 800, 0, 200);
         var replay = create(owner, "withdrawals", 300, "second");
         replay.ok(202);
@@ -681,6 +725,143 @@ class WalletCoreTest {
         } finally {
             releaseSlowPayout.countDown();
         }
+    }
+
+    String adminToken() throws Exception {
+        return token("admin", key, "digital-wallet-auth", Instant.now().plusSeconds(1800), "ADMIN");
+    }
+
+    void markEligible(Reply operation) {
+        db.sql("update bank_operations set created_at=now()-interval '61 seconds' where id=?")
+                .param(UUID.fromString(operation.body.required("id").asText())).update();
+    }
+
+    @Test void acc2_11_timedOutPayoutRecoveredByPoll_RES4_RES7() throws Exception {
+        var owner = customer(10000);
+        var op = create(owner, "withdrawals", 9111, "timeout");
+        String id = op.ok(202).required("id").asText();
+        try {
+            await().atMost(8, TimeUnit.SECONDS).until(() -> bankCalls.getOrDefault(id, List.of()).size() >= 2);
+            funds(owner, 889, 9111, 9111);
+            markEligible(op);
+            await().atMost(5, TimeUnit.SECONDS).until(() -> lookups.containsKey(id));
+            assertThat(call(get("/api/v1/wallets/me"), owner.token).ok(200).required("reserved").asLong()).isEqualTo(9111);
+            bankRecords.computeIfPresent(id, (ref, row) -> row.deepCopy().put("status", "SUCCEEDED"));
+            await().atMost(5, TimeUnit.SECONDS).until(() ->
+                    call(get(op.location), owner.token).ok(200).required("status").asText().equals("SUCCEEDED"));
+            assertBankEvents(owner, op, "withdrawal", "succeeded");
+        } finally {
+            delayedReply.countDown();
+        }
+        var wallet = call(get("/api/v1/wallets/me"), owner.token).ok(200);
+        assertThat(wallet.required("balance").asLong()).isEqualTo(889);
+        assertThat(wallet.required("reserved").asLong()).isZero();
+        invariants();
+    }
+
+    @Test void acc2_12_webhookRacesReconciliation_RES6_EVT1() throws Exception {
+        var owner = customer(0);
+        var op = create(owner, "deposits", 522, "race");
+        String id = op.ok(202).required("id").asText();
+        await().atMost(5, TimeUnit.SECONDS).until(() -> bankRecords.containsKey(id));
+        String admin = adminToken();
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var webhookResult = tx.execute(status -> {
+                db.sql("select id from bank_operations where id=? for update").param(UUID.fromString(id)).query(UUID.class).single();
+                bankRecords.computeIfPresent(id, (ref, row) -> row.deepCopy().put("status", "SUCCEEDED"));
+                call(post("/api/v1/admin/reconciliation"), admin).ok(202);
+                var result = pool.submit(() -> webhook(op, "CHARGE", "SUCCEEDED", 0, "test-webhook-secret").ok(200));
+                // Wait until both settlement transactions actually contend for the same operation.
+                await().atMost(5, TimeUnit.SECONDS).until(() -> scalar("""
+                        select count(*) from pg_stat_activity where wait_event_type='Lock'
+                        and query like 'select * from bank_operations where id=%for update%'
+                        """) >= 2);
+                return result;
+            });
+            webhookResult.get(5, TimeUnit.SECONDS);
+        }
+        funds(owner, 522, 0, 0);
+        assertBankEvents(owner, op, "deposit", "succeeded");
+        invariants();
+    }
+
+    @Test void acc2_13_outageThenResubmitUnknownReferences_RES3_RES7() throws Exception {
+        var owner = customer(40000);
+        var ops = new ArrayList<Reply>();
+        outage.set(true);
+        try {
+            for (int amount = 9101; amount <= 9103; amount++) {
+                var op = create(owner, "withdrawals", amount, "outage-" + amount);
+                op.ok(202);
+                ops.add(op);
+            }
+            await().atMost(8, TimeUnit.SECONDS).until(() -> ops.stream().allMatch(op ->
+                    bankCalls.getOrDefault(op.body.required("id").asText(), List.of()).size() == 4));
+            funds(owner, 12694, 27306, 27306);
+            ops.forEach(this::markEligible);
+            await().atMost(5, TimeUnit.SECONDS).until(() ->
+                    ops.stream().allMatch(op -> lookups.containsKey(op.body.required("id").asText())));
+            assertThat(call(get("/api/v1/wallets/me"), owner.token).ok(200).required("reserved").asLong()).isEqualTo(27306);
+        } finally {
+            outage.set(false);
+        }
+        for (var op : ops) {
+            String id = op.body.required("id").asText();
+            await().atMost(5, TimeUnit.SECONDS).until(() ->
+                    call(get(op.location), owner.token).ok(200).required("status").asText().equals("SUCCEEDED"));
+            assertThat(lookups.get(id)).isPositive();
+            assertThat(bankCalls.get(id)).hasSize(5).containsOnly(bankCalls.get(id).getFirst());
+            assertBankEvents(owner, op, "withdrawal", "succeeded");
+        }
+        var wallet = call(get("/api/v1/wallets/me"), owner.token).ok(200);
+        assertThat(wallet.required("balance").asLong()).isEqualTo(12694);
+        assertThat(wallet.required("reserved").asLong()).isZero();
+        invariants();
+    }
+
+    @Test void administration_ADM1_ADM2_ADM3_ADM4_API5_SEC3() throws Exception {
+        var first = customer(0);
+        var owner = customer(100);
+        var op = create(owner, "withdrawals", 42, "held");
+        var admin = adminToken();
+        for (String endpoint : List.of("integrity","status","wallets","reconciliation")) {
+            String path = "/api/v1/admin/" + endpoint;
+            boolean trigger = endpoint.equals("reconciliation");
+            call(trigger ? post(path) : get(path), null).code(401, "UNAUTHENTICATED");
+            call(trigger ? post(path) : get(path), owner.token).code(403, "FORBIDDEN");
+        }
+        var report = call(get("/api/v1/admin/integrity"), admin).ok(200);
+        assertThat(report.required("ok").asBoolean()).isTrue();
+        assertThat(report.required("checks")).hasSize(6);
+        assertThat(report.required("totals").required("payoutHold").asLong()).isEqualTo(
+                scalar("select balance from accounts where system_name='PAYOUT_HOLD'"));
+        var status = call(get("/api/v1/admin/status"), admin).ok(200);
+        assertThat(status.required("pendingWithdrawals").asLong()).isEqualTo(
+                scalar("select count(*) from bank_operations where status='PENDING' and kind='WITHDRAWAL'"));
+        assertThat(status.required("outboxUnsent").asLong()).isEqualTo(scalar("select count(*) from outbox where sent_at is null"));
+        assertThat(status.required("pendingDeposits").asLong()).isEqualTo(
+                scalar("select count(*) from bank_operations where status='PENDING' and kind='DEPOSIT'"));
+        long pendingAge = scalar("""
+                select greatest(0, floor(extract(epoch from now()-min(created_at)))) from bank_operations where status='PENDING'
+                """);
+        long unsentAge = scalar("""
+                select greatest(0, floor(extract(epoch from now()-min((envelope->>'occurredAt')::timestamptz))))
+                from outbox where sent_at is null
+                """);
+        assertThat(status.required("oldestPendingSeconds").asLong()).isBetween(Math.max(0, pendingAge - 1), pendingAge);
+        assertThat(status.required("outboxOldestSeconds").asLong()).isBetween(Math.max(0, unsentAge - 1), unsentAge);
+        assertThat(status.required("bankCircuit").asText()).isEqualTo("CLOSED");
+        var page = call(get("/api/v1/admin/wallets?limit=1"), admin).ok(200);
+        var row = page.required("items").get(0);
+        assertThat(row.required("walletId").asText()).isEqualTo(owner.wallet.toString());
+        assertThat(row.required("balance").asLong()).isEqualTo(58);
+        assertThat(row.required("reserved").asLong()).isEqualTo(42);
+        customer(0);
+        var next = call(get("/api/v1/admin/wallets?limit=1").param("cursor", page.required("nextCursor").asText()),admin).ok(200);
+        assertThat(next.required("items").get(0).required("walletId").asText()).isEqualTo(first.wallet.toString());
+        for (String query : List.of("limit=0","limit=101","cursor=!"))
+            call(get("/api/v1/admin/wallets?" + query), admin).code(400, "VALIDATION_FAILED");
+        webhook(op, "PAYOUT", "SUCCEEDED", 0, "test-webhook-secret").ok(200);
     }
 
     @Test void transferRacesWithdrawal_CON2_MNY3() throws Exception {

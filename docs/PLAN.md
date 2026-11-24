@@ -59,7 +59,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   routing per Section 6.1 proxy table.
 - [x] **M9 Baseline gate**: run ACC-1 B1..B7 end to end via `docker compose up --build`; fix gaps.
   **Baseline complete.**
-- [ ] **M10 Resilience**: reconciliation job (30s/10s defaults, RES-7) + admin trigger (ADM-4), re-submission for
+- [x] **M10 Resilience**: reconciliation job (30s/10s defaults, RES-7) + admin trigger (ADM-4), re-submission for
   unknown references, restart recovery (RES-8). Admin endpoints: integrity with snapshot isolation (ADM-1),
   status (ADM-2), wallets (ADM-3). Tests: ACC-2 #11, #12, #13, #14.
 - [ ] **M11 Hardening**: SEC-3 (admin role on admin endpoints), SEC-5 (server-side input validation), login rate
@@ -207,3 +207,16 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   - **B7 passed.** Through nginx, unauthenticated GET `/api/v1/wallets/me` returned 401 UNAUTHENTICATED.
     Bob's token returned 200 for his own wallet and 404 NOT_FOUND for Alice's B3 deposit
     `01a20ad4-9754-78ce-9938-4a01e81d1c10`, which Alice could still read with status SUCCEEDED.
+
+- 2026-11-23 — M10 complete (RES-3 through RES-8, CON-5, ADM-1 through ADM-4, ACC-2 #11–#14).
+  Wallet-service scans PostgreSQL every 10 seconds for operations pending over 30 seconds by default.
+  Both timings are configurable. A manual run includes all pending operations. Bank lookups and same-reference
+  resubmissions use the submission circuit and retry policy outside database transactions. Definitive results
+  use the webhook settlement transaction, including the ledger and outbox write.
+  The four admin endpoints require ADMIN. Integrity reads INV-1 through INV-6 at REPEATABLE READ.
+  Root `./mvnw -q verify` passed all 51 tests with zero failures, errors or skips. Surefire recorded the
+  timed-out payout, row-lock race, three withdrawals during an outage, declined payout, and admin API tests.
+  An isolated Compose smoke test killed wallet-service with a 2,400-cent payout and a 600-cent deposit pending
+  after the bank withheld responses and sent zero webhooks. PostgreSQL and the bank retained their original
+  processes. Automatic reconciliation after restart left 8,200 cents available and zero reserved. The payout
+  had two postings and two events, and the deposit had one posting and one event.
