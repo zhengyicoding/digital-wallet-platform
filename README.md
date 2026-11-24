@@ -4,7 +4,7 @@ A local USD wallet with a customer SPA and an admin console. Transfers post imme
 
 ## Start the platform
 
-From the repository root, use a running Docker Engine with the Compose plugin and access to pull images and Maven dependencies on the first build. Compose builds the Java services and serves the static frontend through nginx. For the default configuration, host ports 8080, 5432, 9092, 9090, 3000 and 3200 must be available.
+From the repository root, use a running Docker Engine with the Compose plugin and access to pull images and Maven dependencies on the first build. Compose builds the Java services and serves the static frontend through nginx. For the default configuration, host ports 8080, 9090, 3000 and 3200 must be available. PostgreSQL and Kafka are reachable only inside the Compose network, so a local PostgreSQL on 5432 or broker on 9092 does not conflict.
 
 ```sh
 cp .env.example .env
