@@ -1,3 +1,4 @@
+
 # Digital Wallet web application
 
 The buildless SPA in `public/` runs at `http://localhost:8080/` in the existing nginx container.
@@ -24,14 +25,18 @@ npm --prefix web test
 ./mvnw -q verify
 ```
 
-The optional real-browser smoke script needs an installed `playwright-core` (1.50.1 was used)
-and Chrome. Start Compose first, then run:
+The real-browser suites use the pinned dev dependency `playwright-core` (1.50.1) with the
+installed Chrome; playwright-core never downloads browsers. Install it once into `web/node_modules`
+(ignored by Git), start Compose, then run the customer suite:
 
 ```sh
-PLAYWRIGHT_CORE_PATH=/absolute/path/to/playwright-core \
-CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
-node web/test/browser-smoke.cjs
+npm --prefix web ci --ignore-scripts
+npm --prefix web run test:browser
 ```
+
+`CHROME_PATH` overrides the default macOS Chrome location
+(`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`); `PLAYWRIGHT_CORE_PATH` can still
+point at another playwright-core copy.
 
 `WALLET_URL` defaults to `http://localhost:8080`; `WALLET_SCREENSHOT` optionally saves a mobile
 home screenshot. The script creates unique Alice/Bob accounts and real customer transactions.
@@ -54,11 +59,17 @@ M10 APIs. Bank controls use the simulator's separate `/bank/admin/config` route 
 The Grafana dashboard and Tempo trace viewer links use the current host and the published
 `GRAFANA_PORT` (default 3000).
 
-Run the UI-3 browser check against its own Compose project. It creates wallets and real deposits,
-exercises all presets and restores the previous simulator settings on exit. Set
-`PLAYWRIGHT_CORE_PATH` and optionally `CHROME_PATH` as above.
+Run the UI-3 browser check against the default stack, or against its own Compose project. It
+creates wallets and real deposits, exercises all presets and restores the previous simulator
+settings on exit. It reads `ADMIN_USERNAME` and `ADMIN_PASSWORD` from the environment, and
+`WALLET_URL` (default `http://127.0.0.1:19083`) selects the edge:
 
 ```sh
+# Default stack on port 8080 (uses the same .env as Compose):
+set -a; . ./.env; set +a
+WALLET_URL=http://127.0.0.1:8080 npm --prefix web run test:admin-browser
+
+# Isolated project:
 docker compose --env-file .env.example -p wallet-m13-check -f docker-compose.yml -f web/test/compose-admin.yml up --build --wait
 node --env-file=.env.example web/test/admin-browser.cjs
 ```

@@ -92,9 +92,6 @@ def span_id(value):
     return value.lower() if re.fullmatch(r"[0-9a-fA-F]{16}", value) else base64.b64decode(value).hex()
 
 
-# Resolve recreated upstream containers when repeating this check against the same isolated project.
-docker("web", "nginx", "-s", "reload")
-
 # Keep credentials and tokens entirely out of evidence, exceptions and log output.
 password = "m12-password-" + uuid.uuid4().hex
 secrets.append(password)
