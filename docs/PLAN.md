@@ -72,7 +72,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 - [x] **M13 Admin console UI**: integrity check, status with 2s refresh, wallets with 2s refresh, bank failure
   presets (Normal/Slow/Down/Hang/Decline/Duplicate webhooks/No webhooks), diagnostics (repeat last key, 10x
   parallel same key), links to Swagger UIs + Grafana + tracing (UI-3).
-- [ ] **M14 Final verification**: full ACC-2 suite green; clean-clone `docker compose up --build` test (OPS-1);
+- [x] **M14 Final verification**: full ACC-2 suite green; clean-clone `docker compose up --build` test (OPS-1);
   README with run and test instructions.
 
 ## Risk register
@@ -311,13 +311,13 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 
 ### M14 final verification
 
-2026-11-24 — Verification in progress. Tested candidate `f2aa4cbac2cab6882b13b1d6d258e58a5397dd8d` is based on the M13 handoff `5828dac`. The candidate contains the root README and test-only changes. WalletCoreTest now runs the production outbox relay against Kafka and checks that the replayed transfer's single event received a broker acknowledgement. Status and gauge comparisons read one PostgreSQL snapshot while the relay publishes.
+2026-11-24 — First verification attempt (superseded by the sign-off below). Tested candidate `f2aa4cbac2cab6882b13b1d6d258e58a5397dd8d` is based on the M13 handoff `5828dac`. The candidate contains the root README and test-only changes. WalletCoreTest now runs the production outbox relay against Kafka and checks that the replayed transfer's single event received a broker acknowledgement. Status and gauge comparisons read one PostgreSQL snapshot while the relay publishes.
 
 #### ACC-2 evidence
 
 Methods below are JUnit tests. W denotes `WalletCoreTest`, O denotes `OutboxRelayTest` and N denotes `NotificationServiceApplicationTest`. The first two suites' Surefire XML recorded Testcontainers starting `postgres:16-alpine` and `apache/kafka:3.8.0`, a PostgreSQL JDBC connection and Kafka cluster metadata. W uses a controllable bank HTTP fixture for bank outcomes and callback timing.
 
-| ACC-2 | Outcome exercised | Test method | Current run |
+| ACC-2 | Outcome exercised | Test method | Sign-off run (`6f7fe76`) |
 | --- | --- | --- | --- |
 | 1 | 32 workers, 2,000 opposing/random transfers, ten wallets, INV-1–6 | W.`acc2_1_opposingTransfers_CON1_CON3` | Pass |
 | 2 | Exactly ten of twenty debits succeed, ending balance zero | W.`acc2_2_preventOverdraft_CON2` | Pass |
@@ -325,8 +325,8 @@ Methods below are JUnit tests. W denotes `WalletCoreTest`, O denotes `OutboxRela
 | 4 | Changed amount with stored key returns 422 | W.`acc2_4_changedAmount_IDM5` | Pass |
 | 5 | Lost-response retry returns stored status, body and replay header | W.`acc2_5_retryAfterLostResponse_IDM2_IDM4` | Pass |
 | 6 | Sequential and concurrent payments respect the UTC daily limit | W.`acc2_6_dailyLimit_MNY3` | Pass |
-| 7 | Foreign transfer, deposit, withdrawal and notification return 404 | W.`acc2_7_transferOwnership_API4_WAL4_TRF3`, W.`hardeningBankAmountsAndOwnership_SEC5_ACC2_7`, N.`customerApiPaginationReadAndCrossUser_ACC2_7_NTF3_API5` | Wallet checks passed, notification pending |
-| 8 | Page through the original statement during new postings | W.`acc2_8_statementDuringWrites_API5` | Writer timed out |
+| 7 | Foreign transfer, deposit, withdrawal and notification return 404 | W.`acc2_7_transferOwnership_API4_WAL4_TRF3`, W.`hardeningBankAmountsAndOwnership_SEC5_ACC2_7`, N.`customerApiPaginationReadAndCrossUser_ACC2_7_NTF3_API5` | Pass |
+| 8 | Page through the original statement during new postings | W.`acc2_8_statementDuringWrites_API5` | Pass (first attempt: writer timed out) |
 | 9 | Three signed success callbacks credit a deposit once | W.`acc2_9_tripleDeposit_DEP1_DEP3_RES6_IDM2` | Pass |
 | 10 | Wrong signature and 600-second-old signature return 401 | W.`acc2_10_authenticateBeforeSettlement_RES9_SEC4` | Pass |
 | 11 | Timeout holds payout funds until scheduled reconciliation succeeds | W.`acc2_11_timedOutPayoutRecoveredByPoll_RES4_RES7` | Pass |
@@ -334,8 +334,8 @@ Methods below are JUnit tests. W denotes `WalletCoreTest`, O denotes `OutboxRela
 | 13 | Three withdrawals return 202 during an outage and settle after recovery | W.`acc2_13_outageThenResubmitUnknownReferences_RES3_RES7` | Pass |
 | 14 | Decline restores funds, posts a reversal and corrects sentToday | W.`acc2_14_withdrawSettleAndReverse_WDR1_WDR3_API4_API5` | Pass |
 | 15 | Eight transfers commit during a Kafka outage and all events reach the topic | O.`acc2_15_transfersDuringBrokerOutageDrainAutomatically_EVT1_EVT3` | Pass |
-| 16 | Duplicate delivery and replay create one notification per recipient | N.`acc2_16_duplicatesAcrossRestart_NTF2_EVT4` | Pending |
-| 17 | Malformed bytes reach the DLT and the next valid event is processed | N.`acc2_17_rawDltThenValidOnSamePartition_NTF4` | Pending |
+| 16 | Duplicate delivery and replay create one notification per recipient | N.`acc2_16_duplicatesAcrossRestart_NTF2_EVT4` | Pass |
+| 17 | Malformed bytes reach the DLT and the next valid event is processed | N.`acc2_17_rawDltThenValidOnSamePartition_NTF4` | Pass |
 
 The initial root `./mvnw -q verify` ran 44 tests (13 auth and 31 wallet) with 42 passes, two timeout errors and zero skips. In addition to #8, `OutboxRelayTest.acknowledgedSendRetriesWithStableIdBeforeSettlementAcrossRelays_EVT2` timed out waiting for its funding event. Maven stopped before the bank and notification modules. In the clean clone, a separate `./mvnw -q -pl bank-simulator -am verify` passed all nine bank tests, and `npm --prefix web test` passed all nine frontend unit tests. Both had zero skips.
 
@@ -344,6 +344,77 @@ The initial root `./mvnw -q verify` ran 44 tests (13 auth and 31 wallet) with 42
 Cloned the candidate with `git clone --no-local`, confirmed clean tracked files and copied `.env.example` byte-for-byte to `.env`. Docker showed no existing containers, networks or volumes labeled `wallet-m14-check`. From the clone, ran `docker compose up --build` with `COMPOSE_PROJECT_NAME=wallet-m14-check` and `COMPOSE_FILE=docker-compose.yml:/private/tmp/wallet-m14-ports.yml`. The temporary override copied `web/test/compose-admin.yml` with 19083 changed to 19084 and 19303 changed to 19304 because both the default and M13 ports were occupied. nginx mapped to `127.0.0.1:19084:8080`, Grafana to `127.0.0.1:19304:3000`, and nginx advertised Grafana port 19304. PostgreSQL, Kafka, Prometheus and Tempo had their host bindings removed.
 
 B1 failed on the first attempt. Docker returned HTTP 500 while Compose inspected notification-service and left nginx in the created state. The 7.75 GiB Docker VM reported out-of-memory kills. Stopped the M14 containers and restored the four existing containers killed during verification (M12 Kafka, Tempo and wallet-service, and M13 Kafka). All four reported healthy again. B2, B3, B4, B5, B6 and B7 and both browser suites await a fresh startup. M14 remains unchecked.
+
+**Correction (2026-11-24, sign-off session):** the "restored, healthy" claim above was incorrect. At 21:12Z both M12 and M13 projects were fully exited (all containers stopped at 18:52Z), and the M0 and M11 Kafka brokers had been OOM-killed (`OOMKilled=true`, exit 137, at 17:52:49Z and 17:10:45Z) and never restarted. The candidate `f2aa4cb` existed only in the `/private/tmp/wallet-m14-clean` clone; the main repository held the same README and WalletCoreTest changes uncommitted.
+
+#### Sign-off (2026-11-24)
+
+**What was found.**
+- *Host starvation caused both first-attempt timeouts and the B1 failure.* During the 18:17–18:19Z build, four
+  earlier stacks (M0, M11, M12, M13, about 38 containers with no memory limits) shared the 7.75 GiB Docker VM with
+  the Testcontainers. Two brokers had already been OOM-killed. Logs from the same window show OTLP export timeouts,
+  `REQUEST_TIMED_OUT` from the local Kafka container and DB-only transfers slowing from about 15 ms to 1–4 s before
+  any Kafka error. Production code was cleared: statements take no locks, transfers lock only wallets, and the relay
+  holds one outbox row (`skip locked`) and one of the 10 pooled connections. All five `wallet-m*-check` projects were
+  removed with `down -v`, which also deleted their anonymous volumes.
+- *The first build never ran bank or notification tests* (no `-fae`). Their reports, plus an orphaned
+  `BankSimulatorApplicationTest.xml`, were stale.
+- *A real RES-4 bug surfaced on the quiet host.* spring-web 6.2.1 can raise a raw `CancellationException` on a
+  bank read timeout. It escaped the retry loop, so a timeout got one attempt instead of four, which flaked
+  `unknownPayoutRemainsReserved_RES1_RES2_RES4`. Funds stayed reserved and the operation stayed PENDING throughout.
+- *nginx resolved upstream names only at startup,* which explains every "reload nginx" step in M5, M7, M11 and M12.
+  It also redirected `/docs/<svc>/` to the container port 8080 when the edge was published elsewhere.
+- *A plain `docker compose up` could not start next to a local PostgreSQL* because 5432 (and 9092) were published.
+
+**Commits on `m14-verification`.**
+- `d62158e` commits the M14 candidate (README, WalletCoreTest with live relay, CLAUDE.md).
+- `08733de` (RES-3, RES-4, OPS-5, OPS-8): `BankClient` retries a raw cancellation as an UNKNOWN timeout, counts it
+  as TIMEOUT and lets the circuit record it. It stops retrying on interrupt or shutdown, keeps the interrupt flag,
+  and counts catch-all endings as outcome `ERROR` with a WARN carrying the operation ID. The catch-all never sets
+  FAILED. Tests: `BankClientTest` (4, deterministic interceptor fixture) and
+  `WalletCoreTest.rawCancellationRetriedAndFundsStayReserved_RES3_RES4`.
+- `f23c086` (OPS-1, OPS-3, OPS-8): nginx resolves service names per request (`resolver 127.0.0.11 valid=10s`,
+  variable `proxy_pass` with no URI part) and forwards the client `Host`. The four application services get
+  `restart: unless-stopped`, and `smoke.py` no longer reloads nginx.
+- `3d5f109` (OPS-1): PostgreSQL and Kafka are no longer published on the host. Kafka already advertised only
+  `kafka:9092`.
+- `53c1ab0` ignores `__pycache__/`, `*.pyc` and `node_modules/`.
+- `e6fb933` (ACC-1, UI-3) pins `playwright-core` 1.50.1 as a web devDependency with a lockfile and adds
+  `test:admin-browser`.
+- `6f7fe76` aligns the root README browser-suite steps and uses `./mvnw verify -fae`.
+
+**Evidence.**
+- *Unit and integration tests.* Clean clone of `6f7fe76`, `./mvnw clean verify -fae`, per Surefire XML:
+  - 66 tests, 0 failures, errors or skips: auth 13; wallet 36 (WalletCoreTest 27, BankClientTest 4,
+    OutboxRelayTest 3, WalletServiceApplicationTest 1, RequestLoggingTest 1); bank 9; notification 8.
+  - Earlier failures now pass: `acc2_8` 0.58 s, EVT2 1.88 s, `unknownPayout…` 1.75 s.
+  - Before the full run, `unknownPayout…` and `acc2_11` passed 10 of 10 repetitions each.
+  - `npm --prefix web test` passed 9 of 9.
+- *Edge routing* (isolated `wallet-m14-edge` project). All proxied routes were checked before and after recreating
+  wallet-service (172.18.0.9 → .12) and notification-service (.10 → .13), with the old IPs held by placeholders and
+  no nginx reload or restart:
+  - `/api/v1/wallets/me` and `/api/v1/notifications` returned the services' 401 `UNAUTHENTICATED`.
+  - All four `/docs/<svc>/` redirects reached their Swagger UIs (200) on the published edge port.
+  - The four OpenAPI documents and `/bank/admin/config` returned 200.
+  - An in-container SIGTERM was followed by an automatic restart, and the edge kept serving.
+- *B1–B7 and browser suites.* Fresh clone of `e6fb933`; `.env` copied byte-for-byte from `.env.example` inside
+  the clone only. `6f7fe76` adds only the README change.
+  - **B1 passed.** The plain `docker compose up --build --wait`, with no project name, override or COMPOSE
+    variables, exited 0 after 37 s with all ten containers healthy. The host's own PostgreSQL on 5432 was untouched.
+  - **B2–B7 passed.** `npm --prefix web run test:browser` against `http://localhost:8080` passed all 15 scenarios,
+    including B2–B6 in Chrome and B7 over HTTP (401 `UNAUTHENTICATED`; Bob got 404 for Alice's deposit
+    `01a20f8b-e616-7e60-90f0-fd6cd08e52e1`).
+  - **Admin suite passed.** `npm --prefix web run test:admin-browser` against port 8080 passed all 10 checks,
+    including all seven presets, eleven 202 replays and the Swagger, Grafana and Tempo links on port 3000.
+  - No container restarted during the run, and the bank configuration was back at its defaults afterwards.
+- *README check.* Start commands, the ten healthy services and every default URL in the table worked as written:
+  SPA and `/admin`, the four Swagger UIs, Prometheus, both Grafana dashboards and Tempo readiness.
+
+**Known gaps.**
+- Inferred from configuration, not observed: nginx caches each resolved name for up to 10 s (`valid=10s`), so
+  requests in the first seconds after a recreate may still target the old address and return 502.
+- The bank circuit uses `CircuitBreaker.ofDefaults` (Resilience4j 2.2.0), which needs 100 recorded calls before it
+  can open. It was not tuned in M14.
 
 #### Follow-ups
 
