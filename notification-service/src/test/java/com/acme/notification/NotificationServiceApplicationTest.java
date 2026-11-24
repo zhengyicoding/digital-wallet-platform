@@ -19,7 +19,6 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
@@ -30,7 +29,6 @@ import org.testcontainers.kafka.KafkaContainer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -42,7 +40,20 @@ class NotificationServiceApplicationTest {
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
     @Container static final KafkaContainer broker = new KafkaContainer("apache/kafka:3.8.0")
             .withEnv("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false");
-    @DynamicPropertySource static void properties(DynamicPropertyRegistry r) {
+    static com.nimbusds.jose.jwk.RSAKey signingKey;
+    static com.sun.net.httpserver.HttpServer jwks;
+    @org.junit.jupiter.api.AfterAll static void closeJwks() { if (jwks != null) jwks.stop(0); }
+    @DynamicPropertySource static void properties(DynamicPropertyRegistry r) throws Exception {
+        signingKey = new com.nimbusds.jose.jwk.gen.RSAKeyGenerator(2048).keyID("m11").generate();
+        jwks = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        jwks.createContext("/jwks", exchange -> {
+            byte[] body = new com.nimbusds.jose.jwk.JWKSet(signingKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body); exchange.close();
+        });
+        jwks.start();
+        r.add("notification.jwks-uri", () -> "http://127.0.0.1:" + jwks.getAddress().getPort() + "/jwks");
         r.add("spring.kafka.bootstrap-servers", broker::getBootstrapServers);
     }
     @Autowired KafkaTemplate<byte[], byte[]> kafka;
@@ -83,7 +94,19 @@ class NotificationServiceApplicationTest {
                 .param(id).query(Integer.class).single() == 1);
     }
     private org.springframework.test.web.servlet.request.RequestPostProcessor user(UUID id) {
-        return jwt().jwt(j -> j.subject(id.toString())).authorities(new SimpleGrantedAuthority("ROLE_USER"));
+        return signed(id, "USER");
+    }
+
+    private org.springframework.test.web.servlet.request.RequestPostProcessor signed(UUID id, String role) {
+        try {
+            var claims = new com.nimbusds.jwt.JWTClaimsSet.Builder().issuer("digital-wallet-auth")
+                    .subject(id.toString()).expirationTime(Date.from(Instant.now().plusSeconds(300)))
+                    .claim("roles", List.of(role)).build();
+            var token = new com.nimbusds.jwt.SignedJWT(new com.nimbusds.jose.JWSHeader.Builder(
+                    com.nimbusds.jose.JWSAlgorithm.RS256).keyID("m11").build(), claims);
+            token.sign(new com.nimbusds.jose.crypto.RSASSASigner(signingKey));
+            return request -> { request.addHeader("Authorization", "Bearer " + token.serialize()); return request; };
+        } catch (Exception ex) { throw new IllegalStateException(ex); }
     }
 
     @Test void acc2_16_duplicatesAcrossRestart_NTF2_EVT4() throws Exception {
@@ -172,6 +195,10 @@ class NotificationServiceApplicationTest {
         var ids = new HashSet<String>(); first.get("items").forEach(n -> ids.add(n.get("id").asText()));
         second.get("items").forEach(n -> assertThat(ids.add(n.get("id").asText())).isTrue());
         mvc.perform(post(API + "/" + id + "/read").with(user(b))).andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("NOT_FOUND"));
+        // ACC-2 #7: a valid other-user token cannot change the owner's unread notification.
+        assertThat(notifications.unread(a)).isEqualTo(4);
+        assertThat(db.sql("select read from notifications where id=?").param(UUID.fromString(id))
+                .query(Boolean.class).single()).isFalse();
         for (int i = 0; i < 2; i++) mvc.perform(post(API + "/" + id + "/read").with(user(a))).andExpect(status().isNoContent());
         mvc.perform(get(API + "/unread-count").with(user(a))).andExpect(jsonPath("$.count").value(3));
         mvc.perform(get(API).with(user(a)).param("unreadOnly", "true")).andExpect(jsonPath("$.items.length()").value(3));
@@ -185,9 +212,9 @@ class NotificationServiceApplicationTest {
 
     @Test void adminStatsAndPublicDocs_NTF5_SEC1_SEC3() throws Exception {
         mvc.perform(get(API)).andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
-        mvc.perform(get(API + "/admin/stats").with(user(UUID.randomUUID()))).andExpect(status().isForbidden());
+        mvc.perform(get(API + "/admin/stats").with(user(UUID.randomUUID()))).andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("FORBIDDEN"));
         var stats = counters.stats();
-        mvc.perform(get(API + "/admin/stats").with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))
+        mvc.perform(get(API + "/admin/stats").with(signed(UUID.randomUUID(), "ADMIN")))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.eventsProcessed").value(stats.eventsProcessed()))
                 .andExpect(jsonPath("$.duplicatesIgnored").value(stats.duplicatesIgnored()))
                 .andExpect(jsonPath("$.deadLettered").value(stats.deadLettered()));

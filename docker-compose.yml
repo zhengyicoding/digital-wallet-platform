@@ -47,6 +47,7 @@ services:
       start_period: 30s
 
   auth-service:
+    stop_grace_period: 50s
     build:
       context: .
       dockerfile: auth-service/Dockerfile
@@ -54,6 +55,8 @@ services:
       AUTH_DB_URL: ${AUTH_DB_URL}
       AUTH_DB_USER: ${AUTH_DB_USER}
       AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD}
+      LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-5}
+      LOGIN_WINDOW: ${LOGIN_WINDOW:-1m}
       ADMIN_USERNAME: ${ADMIN_USERNAME}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       JWT_ISSUER: ${JWT_ISSUER}
@@ -70,6 +73,7 @@ services:
       start_period: 30s
 
   wallet-service:
+    stop_grace_period: 50s
     build:
       context: .
       dockerfile: wallet-service/Dockerfile
@@ -106,6 +110,7 @@ services:
       start_period: 30s
 
   bank-simulator:
+    stop_grace_period: 50s
     build:
       context: .
       dockerfile: bank-simulator/Dockerfile
@@ -123,6 +128,7 @@ services:
       start_period: 20s
 
   notification-service:
+    stop_grace_period: 50s
     build:
       context: .
       dockerfile: notification-service/Dockerfile

@@ -25,6 +25,7 @@ public class AuthProblems {
     }
 
     public enum Kind {
+        RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS, "Too many login attempts"),
         VALIDATION_FAILED(HttpStatus.BAD_REQUEST, "Check the request fields"),
         USERNAME_TAKEN(HttpStatus.CONFLICT, "Username is already in use"),
         INVALID_CREDENTIALS(HttpStatus.UNAUTHORIZED, "Invalid username or password"),
@@ -53,6 +54,10 @@ public class AuthProblems {
         var body = problem(failure.kind);
         if (failure.kind == Kind.VALIDATION_FAILED) {
             body.setProperty("errors", failure.errors);
+        }
+        if (failure instanceof LoginThrottle.Limited limited) {
+            return ResponseEntity.status(429).header("Retry-After", Long.toString(limited.retryAfter))
+                    .contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
         }
         return response(body);
     }

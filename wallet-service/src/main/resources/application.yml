@@ -1,7 +1,10 @@
 server:
+  shutdown: graceful
   port: ${SERVER_PORT:8082}
 
 spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 40s
   task:
     scheduling:
       pool:

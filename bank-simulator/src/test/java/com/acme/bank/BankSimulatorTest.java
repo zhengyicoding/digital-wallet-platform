@@ -64,6 +64,17 @@ class BankSimulatorTest {
         assertThat(call("GET","/bank/v1/transactions/missing",null,true).statusCode()).isEqualTo(404);
     }
     @Test void bnk1_sec5ValidationAndBnk6Defaults() throws Exception {
+        // SEC-5: reject malformed types and oversized references before touching the bank store.
+        for (String amount : List.of("\"1\"", "\"bad\"", "true", "[]", "{}", "-1", "1.0", "1e2")) {
+            var response = call("POST", "/bank/v1/transactions",
+                    "{\"reference\":\"x\",\"type\":\"CHARGE\",\"amount\":" + amount + "}", true);
+            assertThat(response.statusCode()).isEqualTo(400);
+            assertThat(node(response).path("code").asText()).isEqualTo("VALIDATION_FAILED");
+        }
+        for (String reference : List.of("123", "\"" + "a".repeat(129) + "\"")) {
+            assertThat(call("POST", "/bank/v1/transactions", "{\"reference\":" + reference
+                    + ",\"type\":\"CHARGE\",\"amount\":1}", true).statusCode()).isEqualTo(400);
+        }
         for(String body:List.of("{}","{\"reference\":\"x\",\"type\":\"OTHER\",\"amount\":1}",
                 "{\"reference\":\"x\",\"type\":\"CHARGE\",\"amount\":0}",
                 "{\"reference\":\"x\",\"type\":\"CHARGE\",\"amount\":1.5}",

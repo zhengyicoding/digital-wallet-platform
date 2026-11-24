@@ -15,15 +15,17 @@ import org.springframework.stereotype.Service;
 @Service
 class Accounts implements ApplicationRunner {
 
+    private final LoginThrottle throttle;
     private final AccountRepository accounts;
     private final PasswordEncoder passwords;
     private final String dummyHash;
     private final String adminUsername;
     private final String adminPassword;
 
-    Accounts(AccountRepository accounts, PasswordEncoder passwords,
+    Accounts(AccountRepository accounts, PasswordEncoder passwords, LoginThrottle throttle,
              @Value("${auth.admin-username}") String adminUsername,
              @Value("${auth.admin-password}") String adminPassword) {
+        this.throttle = throttle;
         this.accounts = accounts;
         this.passwords = passwords;
         this.adminUsername = adminUsername;
@@ -55,6 +57,8 @@ class Accounts implements ApplicationRunner {
     }
 
     Profile authenticate(String username, String password) {
+        // Use the exact same accepted username as the repository lookup, including failed password validation.
+        if (username != null && username.matches("[a-z0-9_]{3,20}")) throttle.attempt(username);
         AuthProblems.validate(credentialErrors(username, password));
         var account = accounts.findByUsername(username);
         boolean matches = passwords.matches(password, account.map(Account::passwordHash).orElse(dummyHash));

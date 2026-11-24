@@ -586,7 +586,7 @@ class WalletCoreTest {
 
     @Test void validation_MNY2_SEC5_API6() throws Exception {
         var sender = customer(5);
-        for (String invalid : List.of("-1","0","1.0","1.5","200001","\"1\"","null","9223372036854775808")) {
+        for (String invalid : List.of("-1","0","1.0","1.5","200001","\"1\"","null","9223372036854775808","true","{}","[]","1e2","1x")) {
             call(post("/api/v1/transfers").header("Idempotency-Key",UUID.randomUUID()).contentType("application/json")
                     .content("{\"toWalletId\":\"" + UUID.randomUUID() + "\",\"amount\":" + invalid + "}"),sender.token)
                     .code(400,"VALIDATION_FAILED");
@@ -606,6 +606,24 @@ class WalletCoreTest {
             call(get("/api/v1/wallets/me/entries?" + query),sender.token).code(400,"VALIDATION_FAILED");
         }
     }
+    @Test void hardeningBankAmountsAndOwnership_SEC5_ACC2_7() throws Exception {
+        var owner = customer(1000);
+        var other = customer(0);
+        for (String endpoint : List.of("deposits", "withdrawals")) {
+            for (String invalid : List.of("-1", "0", "1.0", "1.5", "200001", "\"1\"", "null",
+                    "9223372036854775808", "true", "{}", "[]", "1e2", "1x")) {
+                call(post("/api/v1/" + endpoint).header("Idempotency-Key", UUID.randomUUID())
+                        .contentType("application/json").content("{\"amount\":" + invalid + "}"), owner.token)
+                        .code(400, "VALIDATION_FAILED");
+            }
+            var operation = create(owner, endpoint, 10, UUID.randomUUID().toString());
+            operation.ok(202);
+            call(get(operation.location), other.token).code(404, "NOT_FOUND");
+            call(get(operation.location), owner.token).ok(200);
+        }
+        invariants();
+    }
+
     Reply create(Customer owner, String endpoint, long amount, String key) {
         return call(post("/api/v1/" + endpoint).contentType("application/json").header("Idempotency-Key", key)
                 .content("{\"amount\":" + amount + "}"), owner.token);

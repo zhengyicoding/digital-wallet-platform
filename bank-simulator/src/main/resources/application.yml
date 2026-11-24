@@ -1,7 +1,10 @@
 server:
+  shutdown: graceful
   port: ${SERVER_PORT:8083}
 
 spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 40s
   application:
     name: bank-simulator
 
@@ -28,3 +31,5 @@ bank:
   webhook-url: ${BANK_WEBHOOK_URL}
 
 spring.jackson.deserialization.accept-float-as-int: false
+
+spring.jackson.mapper.allow-coercion-of-scalars: false

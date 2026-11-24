@@ -212,6 +212,37 @@ class AuthServiceApplicationTest {
                 .andExpect(jsonPath("$.paths['/api/v1/auth/login']").exists());
     }
 
+    @Test
+    @DisplayName("SEC-9, AUTH-6: five attempts for known and unknown exact usernames; success also counts")
+    void loginThrottle() throws Exception {
+        register("limited_known", "test-password", "Limited").andExpect(status().isCreated());
+        for (String name : java.util.List.of("limited_known", "limited_unknown")) {
+            for (int i = 0; i < 5; i++) login(name, "wrong-password")
+                    .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("INVALID_CREDENTIALS"));
+            login(name, "test-password").andExpect(status().isTooManyRequests())
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().exists("Retry-After"))
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                    .andExpect(jsonPath("$.code").value("RATE_LIMITED")).andExpect(jsonPath("$.traceId").isNotEmpty());
+        }
+        for (int i = 0; i < 5; i++) login("limited_invalid", "short").andExpect(status().isBadRequest());
+        login("limited_invalid", "short").andExpect(status().isTooManyRequests());
+        register("limited_success", "test-password", "Success").andExpect(status().isCreated());
+        for (int i = 0; i < 5; i++) login("limited_success", "test-password").andExpect(status().isOk());
+        login("limited_success", "test-password").andExpect(status().isTooManyRequests());
+    }
+
+    @Test void SEC5_rejectCoercedAndOversizedCredentials() throws Exception {
+        for (String body : java.util.List.of(
+                "{\"username\":12345,\"password\":\"test-password\"}",
+                "{\"username\":\"numeric_pass\",\"password\":123456789}",
+                "{\"username\":\"test_user\",\"password\":\"test-password\",\"displayName\":true}")) {
+            mockMvc.perform(post("/api/v1/auth/register").contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+        }
+        register("a".repeat(21), "test-password", "User").andExpect(status().isBadRequest());
+        register("oversized_pass", "a".repeat(73), "User").andExpect(status().isBadRequest());
+    }
+
     private ResultActions register(String username, String password, String displayName) throws Exception {
         return mockMvc.perform(post("/api/v1/auth/register").contentType(MediaType.APPLICATION_JSON)
                 .content(json.writeValueAsBytes(Map.of(

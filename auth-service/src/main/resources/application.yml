@@ -1,7 +1,10 @@
 server:
+  shutdown: graceful
   port: ${SERVER_PORT:8081}
 
 spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 40s
   application:
     name: auth-service
   datasource:
@@ -36,6 +39,8 @@ springdoc:
     path: /docs/auth/v3/api-docs
 
 auth:
+  login-max-attempts: ${LOGIN_MAX_ATTEMPTS:5}
+  login-window: ${LOGIN_WINDOW:1m}
   admin-username: ${ADMIN_USERNAME}
   admin-password: ${ADMIN_PASSWORD}
   issuer: ${JWT_ISSUER:digital-wallet-auth}

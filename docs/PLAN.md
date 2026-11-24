@@ -62,7 +62,7 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
 - [x] **M10 Resilience**: reconciliation job (30s/10s defaults, RES-7) + admin trigger (ADM-4), re-submission for
   unknown references, restart recovery (RES-8). Admin endpoints: integrity with snapshot isolation (ADM-1),
   status (ADM-2), wallets (ADM-3). Tests: ACC-2 #11, #12, #13, #14.
-- [ ] **M11 Hardening**: SEC-3 (admin role on admin endpoints), SEC-5 (server-side input validation), login rate
+- [x] **M11 Hardening**: SEC-3 (admin role on admin endpoints), SEC-5 (server-side input validation), login rate
   limit SEC-9 (5/min per username, in-memory, configurable), AUTH-6 (login doesn't reveal username existence),
   graceful shutdown (OPS-8), ACC-2 #7 remainder (deposits, withdrawals, notifications cross-user checks).
 - [ ] **M12 Observability**: JSON logs with traceId/spanId/userId (OPS-4), Prometheus metrics per OPS-5
@@ -220,3 +220,32 @@ locking, idempotency table, outbox table, unique constraints); retrofitting thes
   after the bank withheld responses and sent zero webhooks. PostgreSQL and the bank retained their original
   processes. Automatic reconciliation after restart left 8,200 cents available and zero reserved. The payout
   had two postings and two events, and the deposit had one posting and one event.
+
+- 2026-11-23 — M11 complete (SEC-3, SEC-5, SEC-9, AUTH-6, OPS-8, ACC-2 #7).
+  Login uses a configurable rolling limit (default five attempts per exact lowercase username per minute),
+  atomically enforced under concurrent requests for existing and unknown users. Successful attempts and
+  invalid passwords count; throttled requests return 429 RATE_LIMITED with Retry-After. Authentication's
+  existing dummy-hash check and identical public unknown-user/wrong-password response remain in place.
+  Reused the existing ADMIN matchers, ownership queries and money validation. Signed-token tests cover all
+  wallet admin endpoints and notification admin stats, a third user's transfer, deposits and withdrawals,
+  and a cross-user notification mark-as-read that returns 404 NOT_FOUND and leaves the owner's row unread.
+  Auth and bank reject scalar-to-text coercion; bank also rejects numeric strings. Expanded validation
+  checks cover fractional, malformed, out-of-range and overflowing amounts, oversized credentials,
+  display names, transfer notes and bank references, retaining the existing problem response codes.
+  All four Spring services use graceful HTTP shutdown with a 40-second lifecycle phase budget; Compose
+  allows 50 seconds. Notification Kafka shutdown finishes its current record with a 35-second drain budget,
+  retaining RECORD acknowledgement after the database transaction commits and leaving queued records for replay.
+  Final `./mvnw -q verify` passed 56 current tests (12 auth, 29 wallet, 8 bank, 7 notification), with zero
+  failures, errors or skips; Surefire confirms all six new tests ran, plus expanded authorization/validation
+  cases. An obsolete bank skeleton report from an earlier build is excluded from the count.
+  `npm --prefix web test` passed all 7 tests and the existing M9 Chrome script passed all 15 scenarios.
+  The initial browser run hit stale nginx upstream addresses after service recreation; reloading the isolated
+  test nginx and rerunning the whole browser suite passed.
+  The Compose process test `notification-service/src/test/compose/graceful_shutdown.py` passed three checks:
+  a bank HTTP request deliberately delayed for 30 seconds returned its complete response during SIGTERM;
+  notification offsets stayed unchanged while a database lock blocked processing, then shutdown committed
+  exactly the completed record's offset after its database commit; a second same-partition record had no
+  database row and remained uncommitted until restart, when it produced exactly one notification.
+  The first notification test waited for HTTP shutdown logging while Kafka's earlier lifecycle phase was
+  draining. Synchronizing on Docker's SIGTERM event fixed the fixture; the complete process test passed on rerun.
+  M12 observability and M13 admin UI remain scheduled and unchecked.

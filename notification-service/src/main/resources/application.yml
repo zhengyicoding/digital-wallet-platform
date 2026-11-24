@@ -1,7 +1,10 @@
 server:
+  shutdown: graceful
   port: ${SERVER_PORT:8084}
 
 spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 40s
   application:
     name: notification-service
   kafka:

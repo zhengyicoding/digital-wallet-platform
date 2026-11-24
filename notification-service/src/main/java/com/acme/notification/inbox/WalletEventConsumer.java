@@ -69,6 +69,16 @@ public class WalletEventConsumer {
 
     @Configuration
     static class KafkaConfig {
+        @Bean
+        org.springframework.kafka.config.ContainerCustomizer<Object, Object,
+                org.springframework.kafka.listener.ConcurrentMessageListenerContainer<Object, Object>> shutdownDrain() {
+            return container -> {
+                // OPS-8: finish the current record and commit only after its database transaction.
+                // Leave the rest of a fetched batch for redelivery after restart.
+                container.getContainerProperties().setStopImmediate(true);
+                container.getContainerProperties().setShutdownTimeout(35000);
+            };
+        }
         @Bean NewTopic walletEvents() { return TopicBuilder.name("wallet.events").partitions(3).replicas(1).build(); }
         @Bean NewTopic deadLetters() { return TopicBuilder.name("wallet.events.dlt").partitions(3).replicas(1).build(); }
         @Bean CommonErrorHandler retryFailures() {
