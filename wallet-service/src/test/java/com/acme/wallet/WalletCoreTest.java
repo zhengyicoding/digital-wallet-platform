@@ -46,7 +46,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 
 @org.springframework.test.context.ActiveProfiles("test")
 @org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability(tracing = true)
-@SpringBootTest(properties = {"spring.datasource.hikari.maximum-pool-size=32", "wallet.outbox.enabled=true"})
+// Outage and timeout tests here must not trip the RES-3 circuit for later tests; BankCircuitTest covers it.
+@SpringBootTest(properties = {"spring.datasource.hikari.maximum-pool-size=32", "wallet.outbox.enabled=true",
+        "bank.circuit.sliding-window-size=1000", "bank.circuit.minimum-number-of-calls=1000"})
 @AutoConfigureMockMvc(print = org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint.NONE)
 @Testcontainers
 @DirtiesContext

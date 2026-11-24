@@ -30,7 +30,7 @@ import org.springframework.transaction.event.TransactionalEventListener;
 class BankClient {
     private static final Logger log = LoggerFactory.getLogger(BankClient.class);
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
-    private final CircuitBreaker circuit = CircuitBreaker.ofDefaults("bank");
+    private final CircuitBreaker circuit;
     private final Set<UUID> reconciling = ConcurrentHashMap.newKeySet();
     private final HttpClient transport;
     private final RestClient client;
@@ -41,7 +41,8 @@ class BankClient {
 
     BankClient(@Value("${bank.base-url}") URI base, @Value("${bank.api-key}") String apiKey,
                @Value("${bank.timeout}") Duration timeout, ObjectMapper json, BankOperations operations,
-               RestClient.Builder builder, MeterRegistry registry, Tracer tracer) {
+               RestClient.Builder builder, MeterRegistry registry, Tracer tracer, BankCircuitSettings circuitSettings) {
+        circuit = CircuitBreaker.of("bank", circuitSettings.toConfig());
         this.json = json;
         this.operations = operations;
         this.registry = registry;
@@ -74,6 +75,10 @@ class BankClient {
 
     CircuitBreaker.Metrics circuitMetrics() {
         return circuit.getMetrics();
+    }
+
+    CircuitBreaker.EventPublisher circuitEvents() {
+        return circuit.getEventPublisher();
     }
 
     private void dispatch(Submission submission, boolean lookup) {

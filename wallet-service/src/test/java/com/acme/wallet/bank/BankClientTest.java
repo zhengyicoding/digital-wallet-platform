@@ -28,19 +28,26 @@ import static org.mockito.Mockito.verify;
 
 /**
  * spring-web 6.2.1 can report a JDK client read timeout as a raw CancellationException instead of an
- * IOException. The fixture throws it on every attempt, before any socket is opened, so no timing is involved.
+ * IOException. The fixture fails every attempt before any socket is opened, so no timing is involved; `failure`
+ * selects how (raw cancellation by default, a client timeout, or a 503 reply).
  */
 @ExtendWith(OutputCaptureExtension.class)
 class BankClientTest {
     private final AtomicInteger attempts = new AtomicInteger();
+    private volatile String failure = "cancel";
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final BankOperations operations = mock(BankOperations.class);
     private final BankClient client = new BankClient(URI.create("http://bank.invalid"), "test-api-key",
             Duration.ofMillis(500), new ObjectMapper(), operations,
             RestClient.builder().requestInterceptor((request, body, execution) -> {
                 attempts.incrementAndGet();
-                throw new CancellationException();
-            }), registry, Tracer.NOOP);
+                return switch (failure) {
+                    case "timeout" -> throw new java.net.http.HttpTimeoutException("read timed out");
+                    case "503" -> new org.springframework.mock.http.client.MockClientHttpResponse(
+                            new byte[0], org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE);
+                    default -> throw new CancellationException();
+                };
+            }), registry, Tracer.NOOP, new BankCircuitSettings(10, 5, 50, Duration.ofSeconds(15), 2, true));
     private final Submission payout = new Submission(UUID.randomUUID(), "PAYOUT", 73);
 
     @AfterEach void clearInterrupt() {
@@ -89,6 +96,28 @@ class BankClientTest {
         assertThat(attempts).hasValue(4);
         await().atMost(Duration.ofSeconds(5)).until(() -> output.getOut().contains("Bank call for " + payout.reference()));
         assertThat(output.getOut()).contains("ended with IOException").doesNotContain("test-api-key");
+        verify(operations, never()).applyResult(any());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"timeout", "cancel", "503"})
+    void everyUnknownOutcomeIsACircuitFailure_RES3_RES5(String mode) {
+        failure = mode;
+        assertThatThrownBy(() -> client.exchange(payout, false)).isInstanceOf(IOException.class);
+        assertThat(attempts).hasValue(4);
+        assertThat(client.circuitMetrics().getNumberOfFailedCalls()).isEqualTo(4);
+        assertThat(client.circuitMetrics().getNumberOfSuccessfulCalls()).isZero();
+        assertThat(client.circuitState()).isEqualTo("CLOSED");
+    }
+
+    @Test void fifthFailureOpensCircuitAndRejectsWithoutCalling_RES3() {
+        failure = "503";
+        assertThatThrownBy(() -> client.exchange(payout, false)).isInstanceOf(IOException.class);
+        // The window needs five calls; the fifth failure opens it and the sixth attempt is rejected unsent.
+        assertThatThrownBy(() -> client.exchange(payout, false))
+                .isInstanceOf(io.github.resilience4j.circuitbreaker.CallNotPermittedException.class);
+        assertThat(attempts).hasValue(5);
+        assertThat(client.circuitState()).isEqualTo("OPEN");
         verify(operations, never()).applyResult(any());
     }
 }

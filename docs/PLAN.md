@@ -382,8 +382,28 @@ B1 failed on the first attempt. Docker returned HTTP 500 while Compose inspected
 - `e6fb933` (ACC-1, UI-3) pins `playwright-core` 1.50.1 as a web devDependency with a lockfile and adds
   `test:admin-browser`.
 - `6f7fe76` aligns the root README browser-suite steps and uses `./mvnw verify -fae`.
+- RES-3 circuit tuning (follow-up commit, RES-3, RES-5, ADM-2). The bank circuit was `CircuitBreaker.ofDefaults`,
+  which needs 100 calls before it can open. It is now configured under `bank.circuit.*` in `application.yml`, with
+  `BANK_CIRCUIT_*` environment overrides: count-based window 10, minimum 5 calls, 50% failure rate, 15 s open wait,
+  2 half-open calls and automatic transition to HALF_OPEN. Timeouts, connection errors, 5xx replies and raw
+  cancellations all count as failures, while 2xx and 4xx replies count as successes. WalletCoreTest raises its window
+  and minimum to 1,000 so its outage and timeout tests don't trip the circuit for later tests. Tests:
+  - `BankCircuitTest.outageOpensCircuitThenRecoversAndSettlesOnce_RES3_RES5_ADM2` runs against PostgreSQL with the
+    production thresholds and a 3 s open wait.
+    - Two withdrawals during a 503 outage open the circuit. `/api/v1/admin/status` and the
+      `wallet.bank.circuit.state` gauge both report OPEN.
+    - Three more withdrawals return 202, stay PENDING with funds reserved, and are rejected without a bank call.
+    - After the bank returns, the breaker's own transitions are exactly CLOSED→OPEN→HALF_OPEN→CLOSED.
+    - All five withdrawals settle once: two postings, one requested and one succeeded event, and zero reserved.
+      INV-1..6 hold.
+  - `BankClientTest` adds a parameterized check that a timeout, a raw cancellation and a 503 each record four
+    failures, and that the fifth failure opens the circuit and rejects the sixth attempt without sending it.
 
 **Evidence.**
+- *After the circuit tuning.* `./mvnw clean verify -fae` on the branch passed 71 tests, 0 failures, errors or
+  skips: auth 13; wallet 41 (WalletCoreTest 27, BankClientTest 8, OutboxRelayTest 3, BankCircuitTest 1,
+  WalletServiceApplicationTest 1, RequestLoggingTest 1); bank 9; notification 8. `BankCircuitTest` also passed
+  5 of 5 repeated runs.
 - *Unit and integration tests.* Clean clone of `6f7fe76`, `./mvnw clean verify -fae`, per Surefire XML:
   - 66 tests, 0 failures, errors or skips: auth 13; wallet 36 (WalletCoreTest 27, BankClientTest 4,
     OutboxRelayTest 3, WalletServiceApplicationTest 1, RequestLoggingTest 1); bank 9; notification 8.
@@ -413,8 +433,6 @@ B1 failed on the first attempt. Docker returned HTTP 500 while Compose inspected
 **Known gaps.**
 - Inferred from configuration, not observed: nginx caches each resolved name for up to 10 s (`valid=10s`), so
   requests in the first seconds after a recreate may still target the old address and return 502.
-- The bank circuit uses `CircuitBreaker.ofDefaults` (Resilience4j 2.2.0), which needs 100 recorded calls before it
-  can open. It was not tuned in M14.
 
 #### Follow-ups
 
