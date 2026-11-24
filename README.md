@@ -28,7 +28,7 @@ Use `docker compose stop` in the second terminal to retain the containers and th
 The backend suite requires JDK 21 and a Docker daemon accessible to Testcontainers. The included wrapper supplies Maven. The frontend unit suite requires Node.js and npm. Use Node.js 20.6 or later for the browser commands below.
 
 ```sh
-./mvnw -q verify
+./mvnw verify -fae
 npm --prefix web test
 ```
 
@@ -38,32 +38,24 @@ Maven writes JUnit XML to each Java service's `target/surefire-reports/`. The AC
 
 Run the two suites in sequence against a fresh local test stack. They create users, wallets and transactions and temporarily change the simulator settings. The customer suite covers ACC-1 B2–B6 in the SPA and B7 over HTTP through nginx.
 
-Use a new clone with a fresh `.env` as above. For a separate Compose project alongside the default stack, the repository includes a port override (requires Compose 2.24.4 or later). Run these commands in one shell so subsequent Compose commands address the same project.
+Use a new clone with a fresh `.env` and start it with the default command above (`docker compose up --build --wait` waits until all ten services are healthy). Both scripts drive the installed Chrome through the pinned dev dependency `playwright-core` 1.50.1, which never downloads browsers. Set `CHROME_PATH` if Chrome is not at the macOS default. From the repository root, in one shell:
+
+```sh
+npm --prefix web ci --ignore-scripts
+export WALLET_URL=http://localhost:8080
+npm --prefix web run test:browser
+set -a; . ./.env; set +a
+npm --prefix web run test:admin-browser
+docker compose stop
+```
+
+To run beside an existing default stack instead, use a separate Compose project with the repository's port override (requires Compose 2.24.4 or later). It publishes nginx on port 19083 and Grafana on 19303 on loopback:
 
 ```sh
 export COMPOSE_PROJECT_NAME=wallet-browser-check
 export COMPOSE_FILE=docker-compose.yml:web/test/compose-admin.yml
 docker compose up --build --wait
 export WALLET_URL=http://127.0.0.1:19083
-```
-
-This override publishes nginx on port 19083 and Grafana on 19303 on loopback. PostgreSQL, Kafka, Prometheus and Tempo are reachable inside the project network. To test the default stack instead, set `WALLET_URL=http://localhost:8080` in the test shell.
-
-Both scripts use Chrome and `playwright-core`. Point `PLAYWRIGHT_CORE_PATH` at an installed copy, or install it outside the checkout:
-
-```sh
-browser_deps=$(mktemp -d)
-npm install --prefix "$browser_deps" playwright-core@1.50.1
-export PLAYWRIGHT_CORE_PATH="$browser_deps/node_modules/playwright-core"
-```
-
-Set `CHROME_PATH` to your Chrome executable if it differs from the macOS default shown here. From the repository root, with the test stack healthy, run:
-
-```sh
-export CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-node web/test/browser-smoke.cjs
-node --env-file=.env web/test/admin-browser.cjs
-docker compose stop
 ```
 
 The [web test notes](web/README.md) describe the regression checks and the customer suite's controlled browser fixtures.
